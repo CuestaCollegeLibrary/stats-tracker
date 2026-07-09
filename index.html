@@ -355,6 +355,74 @@ td.num, th.num { font-family: var(--font-mono); text-align: right; }
 .upload-drop:hover { border-color: var(--brass); color: var(--brass); }
 .upload-drop input { display: none; }
 
+/* ── Circulation item checklist ──────────────────────────────────── */
+.item-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.item-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--card-line);
+  border-radius: 3px;
+  padding: 8px 10px;
+  background: #fff;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.item-check:has(input:checked) { border-color: var(--forest); background: #f0f5f1; }
+.item-check input[type="checkbox"] { width: auto; flex: none; }
+.item-check span { flex: 1; }
+.item-check .item-count { width: 58px; flex: none; padding: 4px 6px; }
+
+/* ── Section count grid (patron counts) ──────────────────────────── */
+.section-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.section-field label { margin-top: 0; }
+
+.total-strip {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+  background: var(--paper);
+  border: 1px solid var(--card-line);
+  border-radius: 3px;
+  padding: 10px 14px;
+  margin: 16px 0;
+}
+.total-strip b {
+  color: var(--forest);
+  font-size: 1.25rem;
+  margin-left: 10px;
+}
+
+/* ── Reference type chip picker ──────────────────────────────────── */
+.chip-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.chip-option {
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  padding: 9px 16px;
+  border: 1px solid var(--card-line);
+  border-radius: 20px;
+  background: #fff;
+  color: var(--ink);
+  cursor: pointer;
+}
+.chip-option:hover { border-color: var(--brass); }
+.chip-option.selected { background: var(--forest); border-color: var(--forest); color: var(--paper-raised); }
+
 @media (max-width: 560px) {
   .masthead { align-items: flex-start; }
 }
@@ -370,8 +438,6 @@ td.num, th.num { font-family: var(--font-mono); text-align: right; }
 // can view the deployed site can view these values too — see the
 // "A note on security" section in README.md.
 const CONFIG = {
-  // Turso database URL, written as "https://" so the browser client can
-  // talk to it over HTTP.
   TURSO_URL: "https://lib-stats-tracker-cuestacollegelibrary.aws-us-west-2.turso.io",
 
   TURSO_AUTH_TOKEN: "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODM2MzQ5NjYsImlkIjoiMDE5ZjQ4ZDUtYTgwMS03NmM0LWE3YjEtZDEzNjEyMGY2YjRlIiwia2lkIjoiMktaRFFnQUt0ZEo5MXZvRURuZER6N2laTktYUDNUUnRfYXhKY0EzcEdZMCIsInJpZCI6ImZhNjcyNTIxLTczYjctNDlkNC1iMjNiLTQzNTAwZTQxYjc4OSJ9.oDsTaBh5tN3hQAUxZeBMd2FT58wAGhO6RFbJSnppYKQJyMiAn40F_krZNiA4AFxvRb5a7D40QA09WIIZirQzCw",
@@ -401,10 +467,10 @@ async function run(sql, args = []) {
 async function insertInteraction(row) {
   return run(
     `INSERT INTO interactions
-      (entry_date, entry_hour, role, staff_name, category, subcategory, count, notes, source, report_batch_id, campus)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (entry_date, entry_hour, entry_time, role, staff_name, category, subcategory, count, notes, source, report_batch_id, campus)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
-      row.entry_date, row.entry_hour ?? null, row.role, row.staff_name ?? null,
+      row.entry_date, row.entry_hour ?? null, row.entry_time ?? null, row.role, row.staff_name ?? null,
       row.category, row.subcategory ?? null, row.count, row.notes ?? null,
       row.source ?? "manual", row.report_batch_id ?? null, row.campus ?? null,
     ]
@@ -414,10 +480,10 @@ async function insertInteraction(row) {
 async function todaysEntries(role, staffName) {
   const today = todayStr();
   const res = await run(
-    `SELECT id, entry_hour, category, subcategory, count, notes, campus, created_at
+    `SELECT id, entry_hour, entry_time, category, subcategory, count, notes, campus, created_at
      FROM interactions
      WHERE entry_date = ? AND role = ? AND (staff_name = ? OR ? = '')
-     ORDER BY created_at DESC LIMIT 50`,
+     ORDER BY created_at DESC LIMIT 100`,
     [today, role, staffName || "", staffName || ""]
   );
   return res.rows;
@@ -441,7 +507,7 @@ async function dashboardRows(filters) {
 /* ── LOOKUP DATA ──────────────────────────────────────────────────── */
 const ROLES = [
   { key: "student_worker", name: "Student Worker", desc: "Circulation & supply counts" },
-  { key: "librarian", name: "Librarian", desc: "Patron counts, sections, reference" },
+  { key: "librarian", name: "Librarian", desc: "Patron counts & reference interactions" },
   { key: "tech_services", name: "Technical Services", desc: "All of the above, plus report imports" },
 ];
 
@@ -455,23 +521,37 @@ const CAMPUSES = [
 const STUDENT_PIN_CAMPUS = { slocirc1: "slo", ncccirc1: "ncc" };
 
 const CIRCULATION_ITEMS = [
-  ["reserve_book", "Reserve Book"], ["laptop", "Laptop"], ["calculator", "Calculator"],
-  ["charger", "Charger"], ["headphones", "Headphones"], ["other_electronic", "Other Electronic"],
+  ["non_reserve_book", "Non-Reserve Book"],
+  ["reserve_text_book", "Reserve Text Book"],
+  ["charger", "Charger"],
+  ["headphones", "Headphones"],
+  ["calculator", "Calculator"],
+  ["geology_kit", "Geology Kit"],
+  ["lab_goggles", "Lab Goggles"],
+  ["other_item", "Other"],
 ];
 const SUPPLY_ITEMS = [
   ["scantron", "Scantron"], ["bluebook", "Blue Book"], ["notecards", "Notecards"], ["pencil", "Pencil"],
 ];
-const SECTIONS = [
-  ["main_floor", "Main Floor"], ["quiet_study", "Quiet Study"], ["group_study_rooms", "Group Study Rooms"],
-  ["computer_lab", "Computer Lab"], ["periodicals", "Periodicals"], ["other_section", "Other"],
+
+// Sections tracked as part of the hourly patron count. Section usage and
+// overall patron count are now the same form: fill in each section, and
+// the total is the sum.
+const LIBRARY_SECTIONS = [
+  ["computer_lab", "Computer Lab"],
+  ["study_rooms", "Study Rooms"],
+  ["quiet_study", "Quiet Study"],
+  ["open_lab", "Open Lab"],
+  ["zine_table", "Zine Table"],
+  ["printing_area", "Printing Area"],
 ];
-const SERVICES = [
-  ["printing_copying", "Printing / Copying"], ["study_room_booking", "Study Room Booking"],
-  ["research_help_desk", "Research Help Desk"], ["computer_use", "Computer Use"], ["other_service", "Other Service"],
-];
+
 const REFERENCE_TYPES = [
-  ["quick_directional", "Quick / Directional"], ["research_consultation", "Research Consultation"],
-  ["technology_help", "Technology Help"], ["citation_help", "Citation Help"], ["other_reference", "Other"],
+  ["quick_directional", "Quick / Directional"],
+  ["computer_printing", "Computer / Printing"],
+  ["research_assistance", "Research Assistance"],
+  ["citation_assistance", "Citation Assistance"],
+  ["other_reference", "Other"],
 ];
 
 // Report types available in the Technical Services "Report Imports" tab.
@@ -493,7 +573,7 @@ const PHYSICAL_REPORT_TYPES = new Set(["circulation_report", "door_count"]);
 
 const ALL_CATEGORIES = [
   ["circulation", "Circulation"], ["supplies", "Supplies"], ["patron_count", "Patron Count"],
-  ["section_usage", "Section Usage"], ["service_usage", "Service Usage"], ["reference", "Reference Interaction"],
+  ["reference", "Reference Interaction"],
   ["circulation_report", "Physical Circulation Report (import)"], ["door_count", "Door Count (import)"],
   ["digital_interactions", "Digital Interactions (import)"], ["libguides_stats", "LibGuides Stats (import)"],
   ["page_interactions", "Page Interactions (import)"], ["peak_usage_times", "Peak Usage Times (import)"],
@@ -509,12 +589,16 @@ function hourOptions() {
   });
 }
 
+function nowHHMM() {
+  const d = new Date();
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+
 /* ── STATE ────────────────────────────────────────────────────────── */
 const state = {
   role: null,
   staffName: "",
-  view: "login",       // login | student | librarian | tech | dashboard
-  techTab: "student",  // student | librarian | reports
+  view: "login",       // login | student | librarian | reference | reports | dashboard
   loginError: "",
   pickedRole: null,
   defaultCampus: null, // pre-filled campus based on which PIN was used, still editable per entry
@@ -562,22 +646,27 @@ function renderTabs() {
   const tabsEl = $("#tabs");
   let tabs = [];
   if (state.role === "tech_services") {
-    tabs = [["student", "Circulation & Supplies"], ["librarian", "Patrons & Reference"], ["reports", "Report Imports"], ["dashboard", "Dashboard"]];
+    tabs = [
+      ["student", "Circulation & Supplies"],
+      ["librarian", "Patron Counts"],
+      ["reference", "Reference Interactions"],
+      ["reports", "Report Imports"],
+      ["dashboard", "Dashboard"],
+    ];
   } else if (state.role === "student_worker") {
     tabs = [["student", "Log Entry"]];
   } else if (state.role === "librarian") {
-    tabs = [["librarian", "Log Entry"], ["dashboard", "Dashboard"]];
+    tabs = [
+      ["librarian", "Patron Counts"],
+      ["reference", "Reference Interactions"],
+      ["dashboard", "Dashboard"],
+    ];
   }
-  const active = state.role === "tech_services" ? state.techTab : (state.view === "dashboard" ? "dashboard" : (state.role === "student_worker" ? "student" : "librarian"));
   tabsEl.innerHTML = tabs.map(([key, label]) =>
-    `<button class="tab ${key === active ? "active" : ""}" data-tab="${key}">${label}</button>`
+    `<button class="tab ${key === state.view ? "active" : ""}" data-tab="${key}">${label}</button>`
   ).join("");
   tabsEl.querySelectorAll(".tab").forEach(btn => {
-    btn.onclick = () => {
-      if (state.role === "tech_services") state.techTab = btn.dataset.tab;
-      state.view = btn.dataset.tab === "reports" ? "reports" : (btn.dataset.tab === "dashboard" ? "dashboard" : (btn.dataset.tab === "student" ? "student" : "librarian"));
-      render();
-    };
+    btn.onclick = () => { state.view = btn.dataset.tab; render(); };
   });
 }
 
@@ -585,6 +674,7 @@ function renderViewBody() {
   const body = $("#viewBody");
   if (state.view === "student") return renderStudentForm(body);
   if (state.view === "librarian") return renderLibrarianForm(body);
+  if (state.view === "reference") return renderReferenceForm(body);
   if (state.view === "reports") return renderReportsImport(body);
   if (state.view === "dashboard") return renderDashboard(body);
 }
@@ -601,7 +691,7 @@ function renderLogin() {
         <label for="staffName">Your name</label>
         <input id="staffName" placeholder="e.g. Del B." value="${escapeHtml(state.staffName)}" />
         <label for="pin">Team PIN</label>
-        <input id="pin" type="password" inputmode="numeric" placeholder="••••" />
+        <input id="pin" type="password" placeholder="••••" />
         <button class="btn-stamp" id="loginBtn">Enter</button>
         <div class="error-msg" id="loginError">${state.loginError || ""}</div>
       </div>
@@ -626,12 +716,11 @@ function renderLogin() {
     state.loginError = "";
     state.defaultCampus = STUDENT_PIN_CAMPUS[pin] || null;
     state.view = state.role === "student_worker" ? "student" : "librarian";
-    state.techTab = "student";
     render();
   };
 }
 
-/* ── STUDENT WORKER FORM ──────────────────────────────────────────── */
+/* ── STUDENT WORKER FORM (Circulation & Supplies) ─────────────────── */
 function renderStudentForm(body) {
   body.innerHTML = `
     <div class="card">
@@ -641,31 +730,51 @@ function renderStudentForm(body) {
         <div>
           <label for="scCategory">Category</label>
           <select id="scCategory">
-            <option value="circulation">Circulation (reserve items / electronics)</option>
+            <option value="circulation">Circulation</option>
             <option value="supplies">Supplies (scantron, bluebook, etc.)</option>
           </select>
         </div>
         <div>
-          <label for="scItem">Item</label>
-          <select id="scItem"></select>
-        </div>
-      </div>
-      <div class="field-row three">
-        <div>
           <label for="scCampus">Campus</label>
           <select id="scCampus">${CAMPUSES.map(([k, l]) => `<option value="${k}" ${k === state.defaultCampus ? "selected" : ""}>${l}</option>`).join("")}</select>
         </div>
-        <div>
-          <label for="scCount">Count</label>
-          <input id="scCount" type="number" min="1" value="1" />
+      </div>
+
+      <div id="scCircWrap">
+        <label>Items checked out (check all that apply, adjust counts as needed)</label>
+        <div class="item-grid" id="scCircItems">
+          ${CIRCULATION_ITEMS.map(([k, l]) => `
+            <label class="item-check">
+              <input type="checkbox" data-item-check="${k}" />
+              <span>${l}</span>
+              <input type="number" min="1" value="1" class="item-count" data-item-count="${k}" disabled />
+            </label>`).join("")}
         </div>
+      </div>
+
+      <div id="scSupplyWrap" style="display:none">
+        <div class="field-row">
+          <div>
+            <label for="scItem">Item</label>
+            <select id="scItem">${SUPPLY_ITEMS.map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select>
+          </div>
+          <div>
+            <label for="scCount">Count</label>
+            <input id="scCount" type="number" min="1" value="1" />
+          </div>
+        </div>
+      </div>
+
+      <div class="field-row">
         <div>
           <label for="scDate">Date</label>
           <input id="scDate" type="date" value="${todayStr()}" />
         </div>
+        <div>
+          <label for="scNotes">Notes (optional)</label>
+          <input id="scNotes" placeholder="e.g. title, patron type" />
+        </div>
       </div>
-      <label for="scNotes">Notes (optional)</label>
-      <input id="scNotes" placeholder="e.g. title, patron type" />
       <button class="btn-stamp" id="scSubmit">Log entry</button>
     </div>
     <div class="card">
@@ -674,29 +783,53 @@ function renderStudentForm(body) {
       <div id="scTable"></div>
     </div>
   `;
-  const itemSel = $("#scItem");
-  const fillItems = () => {
-    const items = $("#scCategory").value === "circulation" ? CIRCULATION_ITEMS : SUPPLY_ITEMS;
-    itemSel.innerHTML = items.map(([k, l]) => `<option value="${k}">${l}</option>`).join("");
+
+  const circWrap = $("#scCircWrap");
+  const supplyWrap = $("#scSupplyWrap");
+  const refreshCategoryVisibility = () => {
+    const isCirc = $("#scCategory").value === "circulation";
+    circWrap.style.display = isCirc ? "" : "none";
+    supplyWrap.style.display = isCirc ? "none" : "";
   };
-  fillItems();
-  $("#scCategory").onchange = fillItems;
+  refreshCategoryVisibility();
+  $("#scCategory").onchange = refreshCategoryVisibility;
+
+  $("#scCircItems").querySelectorAll("[data-item-check]").forEach(cb => {
+    cb.onchange = () => {
+      $(`[data-item-count="${cb.dataset.itemCheck}"]`).disabled = !cb.checked;
+    };
+  });
 
   $("#scSubmit").onclick = async () => {
     const btn = $("#scSubmit");
     btn.disabled = true;
     try {
-      await insertInteraction({
-        entry_date: $("#scDate").value || todayStr(),
-        role: state.role,
-        staff_name: state.staffName,
-        category: $("#scCategory").value,
-        subcategory: $("#scItem").value,
-        count: Math.max(1, parseInt($("#scCount").value, 10) || 1),
-        notes: $("#scNotes").value || null,
-        campus: $("#scCampus").value,
-      });
-      toast("Logged ✓");
+      const entry_date = $("#scDate").value || todayStr();
+      const campus = $("#scCampus").value;
+      const notes = $("#scNotes").value || null;
+      const category = $("#scCategory").value;
+
+      if (category === "circulation") {
+        const checked = [...$("#scCircItems").querySelectorAll("[data-item-check]:checked")];
+        if (!checked.length) { toast("Check at least one item first", true); btn.disabled = false; return; }
+        for (const cb of checked) {
+          const key = cb.dataset.itemCheck;
+          const count = Math.max(1, parseInt($(`[data-item-count="${key}"]`).value, 10) || 1);
+          await insertInteraction({ entry_date, role: state.role, staff_name: state.staffName, category, subcategory: key, count, notes, campus });
+        }
+        toast(`Logged ${checked.length} item${checked.length > 1 ? "s" : ""} ✓`);
+        checked.forEach(cb => {
+          cb.checked = false;
+          const countInput = $(`[data-item-count="${cb.dataset.itemCheck}"]`);
+          countInput.disabled = true;
+          countInput.value = 1;
+        });
+      } else {
+        const subcategory = $("#scItem").value;
+        const count = Math.max(1, parseInt($("#scCount").value, 10) || 1);
+        await insertInteraction({ entry_date, role: state.role, staff_name: state.staffName, category, subcategory, count, notes, campus });
+        toast("Logged ✓");
+      }
       $("#scNotes").value = "";
       loadStudentTable();
     } catch (err) {
@@ -732,46 +865,38 @@ async function loadStudentTable() {
   ` : `<div class="empty-state">No entries logged yet today.</div>`;
 }
 
-/* ── LIBRARIAN FORM ───────────────────────────────────────────────── */
+/* ── LIBRARIAN FORM (Hourly Patron Counts by Section) ────────────── */
 function renderLibrarianForm(body) {
   body.innerHTML = `
     <div class="card">
-      <h2>Patrons &amp; Reference</h2>
-      <p class="card-sub">Log hourly patron counts, section usage, service usage, and reference interactions. These are all in-person, so pick the campus each one happened at.</p>
-      <div class="field-row">
-        <div>
-          <label for="lcCategory">Category</label>
-          <select id="lcCategory">
-            <option value="patron_count">Patron Count (overall, per hour)</option>
-            <option value="section_usage">Section Usage</option>
-            <option value="service_usage">Service Usage</option>
-            <option value="reference">Reference Interaction</option>
-          </select>
-        </div>
-        <div id="lcSubWrap" style="display:none">
-          <label for="lcSub">Detail</label>
-          <select id="lcSub"></select>
-        </div>
-      </div>
+      <h2>Library Patron Counts</h2>
+      <p class="card-sub">Enter how many patrons were in each section this hour — the total below adds itself up as you go.</p>
       <div class="field-row three">
         <div>
-          <label for="lcCampus">Campus</label>
-          <select id="lcCampus">${CAMPUSES.map(([k, l]) => `<option value="${k}" ${k === state.defaultCampus ? "selected" : ""}>${l}</option>`).join("")}</select>
+          <label for="pcCampus">Campus</label>
+          <select id="pcCampus">${CAMPUSES.map(([k, l]) => `<option value="${k}" ${k === state.defaultCampus ? "selected" : ""}>${l}</option>`).join("")}</select>
         </div>
         <div>
-          <label for="lcCount">Count</label>
-          <input id="lcCount" type="number" min="1" value="1" />
+          <label for="pcDate">Date</label>
+          <input id="pcDate" type="date" value="${todayStr()}" />
         </div>
         <div>
-          <label for="lcDate">Date</label>
-          <input id="lcDate" type="date" value="${todayStr()}" />
+          <label for="pcHour">Hour</label>
+          <select id="pcHour"></select>
         </div>
       </div>
-      <label for="lcHour">Hour</label>
-      <select id="lcHour"></select>
-      <label for="lcNotes">Notes (optional)</label>
-      <input id="lcNotes" placeholder="e.g. topic, context" />
-      <button class="btn-stamp" id="lcSubmit">Log entry</button>
+      <label>Section counts</label>
+      <div class="section-grid" id="pcSections">
+        ${LIBRARY_SECTIONS.map(([k, l]) => `
+          <div class="section-field">
+            <label for="pc_${k}">${l}</label>
+            <input id="pc_${k}" type="number" min="0" value="0" data-section="${k}" />
+          </div>`).join("")}
+      </div>
+      <div class="total-strip">Total Patrons <b id="pcTotal">0</b></div>
+      <label for="pcNotes">Notes (optional)</label>
+      <input id="pcNotes" placeholder="e.g. event, context" />
+      <button class="btn-stamp" id="pcSubmit">Log hourly counts</button>
     </div>
     <div class="card">
       <h2>Today's log</h2>
@@ -779,39 +904,41 @@ function renderLibrarianForm(body) {
       <div id="lcTable"></div>
     </div>
   `;
-  const hourSel = $("#lcHour");
+  const hourSel = $("#pcHour");
   const nowHour = new Date().getHours();
   hourSel.innerHTML = hourOptions().map(([h, l]) => `<option value="${h}" ${h === nowHour ? "selected" : ""}>${l}</option>`).join("");
 
-  const subWrap = $("#lcSubWrap");
-  const subSel = $("#lcSub");
-  const subListFor = (cat) => cat === "section_usage" ? SECTIONS : cat === "service_usage" ? SERVICES : cat === "reference" ? REFERENCE_TYPES : null;
-  const refreshSub = () => {
-    const list = subListFor($("#lcCategory").value);
-    if (!list) { subWrap.style.display = "none"; subSel.innerHTML = ""; return; }
-    subWrap.style.display = "";
-    subSel.innerHTML = list.map(([k, l]) => `<option value="${k}">${l}</option>`).join("");
+  const sectionInputs = [...$("#pcSections").querySelectorAll("[data-section]")];
+  const updateTotal = () => {
+    const total = sectionInputs.reduce((sum, el) => sum + (parseInt(el.value, 10) || 0), 0);
+    $("#pcTotal").textContent = total;
   };
-  refreshSub();
-  $("#lcCategory").onchange = refreshSub;
+  sectionInputs.forEach(el => { el.oninput = updateTotal; });
+  updateTotal();
 
-  $("#lcSubmit").onclick = async () => {
-    const btn = $("#lcSubmit");
+  $("#pcSubmit").onclick = async () => {
+    const btn = $("#pcSubmit");
     btn.disabled = true;
     try {
-      await insertInteraction({
-        entry_date: $("#lcDate").value || todayStr(),
-        entry_hour: parseInt($("#lcHour").value, 10),
-        role: state.role,
-        staff_name: state.staffName,
-        category: $("#lcCategory").value,
-        subcategory: subWrap.style.display === "none" ? null : $("#lcSub").value,
-        count: Math.max(1, parseInt($("#lcCount").value, 10) || 1),
-        notes: $("#lcNotes").value || null,
-        campus: $("#lcCampus").value,
-      });
-      toast("Logged ✓");
-      $("#lcNotes").value = "";
+      const entry_date = $("#pcDate").value || todayStr();
+      const entry_hour = parseInt($("#pcHour").value, 10);
+      const campus = $("#pcCampus").value;
+      const notes = $("#pcNotes").value || null;
+
+      let total = 0;
+      for (const el of sectionInputs) {
+        const count = parseInt(el.value, 10) || 0;
+        total += count;
+        if (count > 0) {
+          await insertInteraction({ entry_date, entry_hour, role: state.role, staff_name: state.staffName, category: "patron_count", subcategory: el.dataset.section, count, notes, campus });
+        }
+      }
+      await insertInteraction({ entry_date, entry_hour, role: state.role, staff_name: state.staffName, category: "patron_count", subcategory: "total_patrons", count: total, notes, campus });
+
+      toast("Logged hourly counts ✓");
+      sectionInputs.forEach(el => { el.value = 0; });
+      updateTotal();
+      $("#pcNotes").value = "";
       loadLibrarianTable();
     } catch (err) {
       console.error(err);
@@ -824,30 +951,126 @@ function renderLibrarianForm(body) {
 
 async function loadLibrarianTable() {
   const rows = await todaysEntries(state.role, state.staffName);
-  const catLabel = (k) => ALL_CATEGORIES.find(c => c[0] === k)?.[1] || k;
-  const subLabel = (k) => [...SECTIONS, ...SERVICES, ...REFERENCE_TYPES].find(i => i[0] === k)?.[1] || k || "—";
+  const patronRows = rows.filter(r => r.category === "patron_count");
+  const sectionLabel = (k) => k === "total_patrons" ? "Total Patrons" : (LIBRARY_SECTIONS.find(s => s[0] === k)?.[1] || k);
 
   const totalsMap = {};
-  rows.forEach(r => { totalsMap[r.category] = (totalsMap[r.category] || 0) + r.count; });
+  patronRows.forEach(r => { if (r.subcategory !== "total_patrons") totalsMap[r.subcategory] = (totalsMap[r.subcategory] || 0) + r.count; });
   $("#lcSummary").innerHTML = Object.entries(totalsMap).length
-    ? Object.entries(totalsMap).map(([k, v]) => `<div class="summary-chip">${catLabel(k)} <b>${v}</b></div>`).join("")
+    ? Object.entries(totalsMap).map(([k, v]) => `<div class="summary-chip">${sectionLabel(k)} <b>${v}</b></div>`).join("")
     : "";
 
-  $("#lcTable").innerHTML = rows.length ? `
-    <table><thead><tr><th>Hour</th><th>Campus</th><th>Category</th><th>Detail</th><th class="num">Count</th><th>Notes</th></tr></thead>
-    <tbody>${rows.map(r => `
-      <tr>
+  $("#lcTable").innerHTML = patronRows.length ? `
+    <table><thead><tr><th>Hour</th><th>Campus</th><th>Section</th><th class="num">Count</th><th>Notes</th></tr></thead>
+    <tbody>${patronRows.map(r => `
+      <tr${r.subcategory === "total_patrons" ? ' style="font-weight:600"' : ""}>
         <td>${r.entry_hour !== null ? hourOptions()[r.entry_hour][1] : "—"}</td>
         <td>${campusLabel(r.campus)}</td>
-        <td>${catLabel(r.category)}</td>
-        <td>${subLabel(r.subcategory)}</td>
+        <td>${sectionLabel(r.subcategory)}</td>
         <td class="num">${r.count}</td>
         <td>${escapeHtml(r.notes || "")}</td>
       </tr>`).join("")}</tbody></table>
   ` : `<div class="empty-state">No entries logged yet today.</div>`;
 }
 
-/* ── REPORT IMPORTS (tech services) ──────────────────────────────── */
+/* ── REFERENCE INTERACTIONS ───────────────────────────────────────── */
+function renderReferenceForm(body) {
+  body.innerHTML = `
+    <div class="card">
+      <h2>Reference Interactions</h2>
+      <p class="card-sub">Log each reference interaction as it happens. No patron count needed — one entry equals one interaction.</p>
+      <div class="field-row three">
+        <div>
+          <label for="rfCampus">Campus</label>
+          <select id="rfCampus">${CAMPUSES.map(([k, l]) => `<option value="${k}" ${k === state.defaultCampus ? "selected" : ""}>${l}</option>`).join("")}</select>
+        </div>
+        <div>
+          <label for="rfDate">Date</label>
+          <input id="rfDate" type="date" value="${todayStr()}" />
+        </div>
+        <div>
+          <label for="rfTime">Time</label>
+          <input id="rfTime" type="time" value="${nowHHMM()}" />
+        </div>
+      </div>
+      <label>Type</label>
+      <div class="chip-picker" id="rfType">
+        ${REFERENCE_TYPES.map(([k, l]) => `<button type="button" class="chip-option" data-ref-type="${k}">${l}</button>`).join("")}
+      </div>
+      <label for="rfNotes">Notes (optional)</label>
+      <input id="rfNotes" placeholder="e.g. topic, context" />
+      <button class="btn-stamp" id="rfSubmit">Log interaction</button>
+    </div>
+    <div class="card">
+      <h2>Today's log</h2>
+      <div id="rfSummary" class="summary-strip"></div>
+      <div id="rfTable"></div>
+    </div>
+  `;
+
+  let selectedType = null;
+  $("#rfType").querySelectorAll(".chip-option").forEach(chip => {
+    chip.onclick = () => {
+      selectedType = chip.dataset.refType;
+      $("#rfType").querySelectorAll(".chip-option").forEach(c => c.classList.toggle("selected", c === chip));
+    };
+  });
+
+  $("#rfSubmit").onclick = async () => {
+    if (!selectedType) { toast("Pick a reference type first", true); return; }
+    const btn = $("#rfSubmit");
+    btn.disabled = true;
+    try {
+      const time = $("#rfTime").value || nowHHMM();
+      await insertInteraction({
+        entry_date: $("#rfDate").value || todayStr(),
+        entry_hour: parseInt(time.split(":")[0], 10),
+        entry_time: time,
+        role: state.role,
+        staff_name: state.staffName,
+        category: "reference",
+        subcategory: selectedType,
+        count: 1,
+        notes: $("#rfNotes").value || null,
+        campus: $("#rfCampus").value,
+      });
+      toast("Logged ✓");
+      $("#rfNotes").value = "";
+      $("#rfTime").value = nowHHMM();
+      selectedType = null;
+      $("#rfType").querySelectorAll(".chip-option").forEach(c => c.classList.remove("selected"));
+      loadReferenceTable();
+    } catch (err) {
+      console.error(err);
+      toast("Couldn't save — check connection", true);
+    } finally { btn.disabled = false; }
+  };
+
+  loadReferenceTable();
+}
+
+async function loadReferenceTable() {
+  const rows = (await todaysEntries(state.role, state.staffName)).filter(r => r.category === "reference");
+  const typeLabel = (k) => REFERENCE_TYPES.find(t => t[0] === k)?.[1] || k;
+
+  const totalsMap = {};
+  rows.forEach(r => { totalsMap[r.subcategory] = (totalsMap[r.subcategory] || 0) + r.count; });
+  $("#rfSummary").innerHTML = Object.entries(totalsMap).length
+    ? Object.entries(totalsMap).map(([k, v]) => `<div class="summary-chip">${typeLabel(k)} <b>${v}</b></div>`).join("")
+    : "";
+
+  $("#rfTable").innerHTML = rows.length ? `
+    <table><thead><tr><th>Time</th><th>Campus</th><th>Type</th><th>Notes</th></tr></thead>
+    <tbody>${rows.map(r => `
+      <tr>
+        <td>${r.entry_time || (r.entry_hour !== null ? hourOptions()[r.entry_hour][1] : "—")}</td>
+        <td>${campusLabel(r.campus)}</td>
+        <td>${typeLabel(r.subcategory)}</td>
+        <td>${escapeHtml(r.notes || "")}</td>
+      </tr>`).join("")}</tbody></table>
+  ` : `<div class="empty-state">No interactions logged yet today.</div>`;
+}
+
 function renderReportsImport(body) {
   body.innerHTML = `
     <div class="card">
