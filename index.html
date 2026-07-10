@@ -280,6 +280,46 @@ input[type="number"] { font-family: var(--font-mono); }
   margin-top: 10px;
 }
 
+.pin-field { position: relative; }
+.pin-field input { padding-right: 60px; }
+.pin-toggle {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+  background: var(--paper);
+  border: 1px solid var(--card-line);
+  border-radius: 3px;
+  padding: 5px 9px;
+  cursor: pointer;
+}
+.pin-toggle:hover { border-color: var(--brass); color: var(--brass); }
+
+/* ── Weekly log entries ───────────────────────────────────────────── */
+.log-entry {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--card-line);
+}
+.log-entry:last-child { border-bottom: none; }
+.log-entry-meta {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+  margin-bottom: 4px;
+}
+.log-entry-meta b { color: var(--forest); }
+.log-entry-text {
+  font-size: 0.92rem;
+  color: var(--ink);
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
 /* ── Today's log / tables ─────────────────────────────────────────── */
 table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 th, td {
@@ -539,6 +579,24 @@ async function dashboardRows(filters) {
   return res.rows;
 }
 
+async function insertWeeklyLogEntry({ campus, role, staff_name, entry_text }) {
+  return run(
+    `INSERT INTO weekly_log (campus, role, staff_name, entry_text) VALUES (?, ?, ?, ?)`,
+    [campus, role, staff_name || null, entry_text]
+  );
+}
+
+async function weeklyLogEntries(campus, from, to) {
+  const res = await run(
+    `SELECT id, staff_name, role, entry_text, created_at
+     FROM weekly_log
+     WHERE campus = ? AND date(created_at) BETWEEN ? AND ?
+     ORDER BY created_at ASC`,
+    [campus, from, to]
+  );
+  return res.rows;
+}
+
 /* ── LOOKUP DATA ──────────────────────────────────────────────────── */
 const ROLES = [
   { key: "student_worker", name: "Student Worker", desc: "Circulation & supply counts" },
@@ -706,15 +764,20 @@ function renderTabs() {
       ["student", "Circulation & Supplies"],
       ["librarian", "Patron Counts"],
       ["reference", "Reference Interactions"],
+      ["weekly", "Weekly Log"],
       ["reports", "Report Imports"],
       ["dashboard", "Dashboard"],
     ];
   } else if (state.role === "student_worker") {
-    tabs = [["student", "Log Entry"]];
+    tabs = [
+      ["student", "Log Entry"],
+      ["weekly", "Weekly Log"],
+    ];
   } else if (state.role === "librarian") {
     tabs = [
       ["librarian", "Patron Counts"],
       ["reference", "Reference Interactions"],
+      ["weekly", "Weekly Log"],
       ["dashboard", "Dashboard"],
     ];
   }
@@ -731,6 +794,7 @@ function renderViewBody() {
   if (state.view === "student") return renderStudentForm(body);
   if (state.view === "librarian") return renderLibrarianForm(body);
   if (state.view === "reference") return renderReferenceForm(body);
+  if (state.view === "weekly") return renderWeeklyLog(body);
   if (state.view === "reports") return renderReportsImport(body);
   if (state.view === "dashboard") return renderDashboard(body);
 }
@@ -747,7 +811,10 @@ function renderLogin() {
         <label for="staffName">Your name</label>
         <input id="staffName" placeholder="e.g. Del B." value="${escapeHtml(state.staffName)}" />
         <label for="pin">Team PIN</label>
-        <input id="pin" type="password" placeholder="••••" />
+        <div class="pin-field">
+          <input id="pin" type="password" placeholder="••••" />
+          <button type="button" class="pin-toggle" id="pinToggle" aria-label="Show PIN">Show</button>
+        </div>
         <button class="btn-stamp" id="loginBtn">Enter</button>
         <div class="error-msg" id="loginError">${state.loginError || ""}</div>
       </div>
@@ -763,7 +830,16 @@ function renderLogin() {
     el.onclick = () => { state.pickedRole = el.dataset.role; renderLogin(); };
   });
   $("#staffName").oninput = (e) => { state.staffName = e.target.value; };
-  $("#loginBtn").onclick = () => {
+
+  $("#pinToggle").onclick = () => {
+    const pinInput = $("#pin");
+    const showing = pinInput.type === "text";
+    pinInput.type = showing ? "password" : "text";
+    $("#pinToggle").textContent = showing ? "Show" : "Hide";
+    $("#pinToggle").setAttribute("aria-label", showing ? "Show PIN" : "Hide PIN");
+  };
+
+  const attemptLogin = () => {
     const pin = $("#pin").value.trim();
     if (!state.pickedRole) { state.loginError = "Pick a role first."; return renderLogin(); }
     const validPins = CONFIG.PINS[state.pickedRole] || [];
@@ -771,9 +847,13 @@ function renderLogin() {
     state.role = state.pickedRole;
     state.loginError = "";
     state.campus = STUDENT_PIN_CAMPUS[pin] || state.campus;
-    state.view = state.role === "student_worker" ? "student" : "librarian";
+    state.view = (state.role === "student_worker" || state.role === "tech_services") ? "student" : "librarian";
     render();
   };
+
+  $("#loginBtn").onclick = attemptLogin;
+  $("#staffName").addEventListener("keydown", (e) => { if (e.key === "Enter") attemptLogin(); });
+  $("#pin").addEventListener("keydown", (e) => { if (e.key === "Enter") attemptLogin(); });
 }
 
 /* ── STUDENT WORKER FORM (Circulation & Supplies) ─────────────────── */
@@ -1080,6 +1160,64 @@ async function loadReferenceTable() {
   ` : `<div class="empty-state">No interactions logged yet today.</div>`;
 }
 
+/* ── WEEKLY LOG ───────────────────────────────────────────────────── */
+function currentWeekRange() {
+  const now = new Date();
+  const day = now.getDay(); // 0 = Sunday
+  const diffToMonday = day === 0 ? 6 : day - 1;
+  const monday = new Date(now);
+  monday.setDate(now.getDate() - diffToMonday);
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  return { from: fmt(monday), to: fmt(sunday), mondayDate: monday };
+}
+
+function renderWeeklyLog(body) {
+  const { from, to, mondayDate } = currentWeekRange();
+  const weekLabel = mondayDate.toLocaleDateString([], { month: "short", day: "numeric" });
+
+  body.innerHTML = `
+    <div class="card">
+      <h2>Weekly Log — ${campusLabel(state.campus)}</h2>
+      <p class="card-sub">Week of ${weekLabel}. A shared notes log for this campus — every entry shows who wrote it and when.</p>
+      <div id="wlEntries"></div>
+    </div>
+    <div class="card">
+      <h2>Add an entry</h2>
+      <textarea id="wlText" rows="3" placeholder="What's worth noting for the week — coverage changes, maintenance issues, handoff notes..."></textarea>
+      <button class="btn-stamp" id="wlSubmit">Post entry</button>
+    </div>
+  `;
+
+  $("#wlSubmit").onclick = async () => {
+    const text = $("#wlText").value.trim();
+    if (!text) { toast("Write something first", true); return; }
+    const btn = $("#wlSubmit");
+    btn.disabled = true;
+    try {
+      await insertWeeklyLogEntry({ campus: state.campus, role: state.role, staff_name: state.staffName, entry_text: text });
+      $("#wlText").value = "";
+      toast("Posted ✓");
+      loadWeeklyLog(from, to);
+    } catch (err) {
+      console.error(err);
+      toast("Couldn't post — check connection", true);
+    } finally { btn.disabled = false; }
+  };
+
+  loadWeeklyLog(from, to);
+}
+
+async function loadWeeklyLog(from, to) {
+  const rows = await weeklyLogEntries(state.campus, from, to);
+  $("#wlEntries").innerHTML = rows.length ? rows.map(r => `
+    <div class="log-entry">
+      <div class="log-entry-meta"><b>${escapeHtml(r.staff_name || "Unknown")}</b> · ${roleLabel(r.role)} · ${fmtDateTime(r.created_at)}</div>
+      <div class="log-entry-text">${escapeHtml(r.entry_text)}</div>
+    </div>`).join("") : `<div class="empty-state">No entries yet this week.</div>`;
+}
+
 function renderReportsImport(body) {
   body.innerHTML = `
     <div class="card">
@@ -1273,6 +1411,12 @@ function renderDashboard(body) {
 function fmtTime(iso) {
   try { return new Date(iso + "Z").toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); }
   catch { return iso; }
+}
+function fmtDateTime(iso) {
+  try {
+    const d = new Date(iso + "Z");
+    return d.toLocaleDateString([], { month: "short", day: "numeric" }) + ", " + d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  } catch { return iso; }
 }
 function campusLabel(k) { return CAMPUSES.find(c => c[0] === k)?.[1] || (k || "—"); }
 function escapeHtml(s) {
