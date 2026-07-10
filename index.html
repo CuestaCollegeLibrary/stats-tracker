@@ -56,7 +56,7 @@ body {
 /* ── Masthead ─────────────────────────────────────────────────────── */
 .masthead {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
   border-bottom: 3px double var(--ink);
@@ -355,28 +355,51 @@ td.num, th.num { font-family: var(--font-mono); text-align: right; }
 .upload-drop:hover { border-color: var(--brass); color: var(--brass); }
 .upload-drop input { display: none; }
 
-/* ── Circulation item checklist ──────────────────────────────────── */
-.item-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 10px;
-  margin-bottom: 6px;
-}
-.item-check {
+/* ── Global campus toggle (in the masthead) ──────────────────────── */
+.campus-toggle {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  background: var(--paper);
   border: 1px solid var(--card-line);
-  border-radius: 3px;
-  padding: 8px 10px;
-  background: #fff;
-  font-size: 0.85rem;
+  border-radius: 20px;
+  padding: 4px;
+}
+.campus-toggle-label {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-soft);
+  padding: 0 6px 0 8px;
+}
+.campus-btn {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  padding: 6px 14px;
+  border: none;
+  border-radius: 16px;
+  background: transparent;
+  color: var(--ink-soft);
   cursor: pointer;
 }
-.item-check:has(input:checked) { border-color: var(--forest); background: #f0f5f1; }
-.item-check input[type="checkbox"] { width: auto; flex: none; }
-.item-check span { flex: 1; }
-.item-check .item-count { width: 58px; flex: none; padding: 4px 6px; }
+.campus-btn.active { background: var(--forest); color: var(--paper-raised); }
+.campus-btn:not(.active):hover { color: var(--forest); }
+
+/* ── Multi-select item dropdowns (circulation & supplies) ────────── */
+select[multiple] {
+  padding: 4px;
+}
+select[multiple] option {
+  padding: 7px 9px;
+  border-radius: 2px;
+}
+select[multiple] option:checked {
+  background: var(--forest) linear-gradient(0deg, var(--forest) 0%, var(--forest) 100%);
+  color: var(--paper-raised);
+}
 
 /* ── Section count grid (patron counts) ──────────────────────────── */
 .section-grid {
@@ -526,6 +549,8 @@ const CIRCULATION_ITEMS = [
   ["charger", "Charger"],
   ["headphones", "Headphones"],
   ["calculator", "Calculator"],
+  ["chromebook", "Chromebook"],
+  ["hotspot", "Hotspot"],
   ["geology_kit", "Geology Kit"],
   ["lab_goggles", "Lab Goggles"],
   ["other_item", "Other"],
@@ -601,7 +626,7 @@ const state = {
   view: "login",       // login | student | librarian | reference | reports | dashboard
   loginError: "",
   pickedRole: null,
-  defaultCampus: null, // pre-filled campus based on which PIN was used, still editable per entry
+  campus: "slo",        // the currently-toggled campus — applied to every physical stat entry
 };
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -626,6 +651,7 @@ function render() {
         <span class="eyebrow">Cuesta College Library</span>
         <h1>Interactions &amp; Usage Tracker</h1>
       </div>
+      <div class="campus-toggle" id="campusToggle"></div>
       <div class="session-tag">
         <span class="date-stamp">${todayStr()}</span>
         <span>${state.staffName ? escapeHtml(state.staffName) + " · " : ""}${roleLabel(state.role)}</span>
@@ -636,8 +662,26 @@ function render() {
     <div id="viewBody"></div>
   `;
   $("#logoutBtn").onclick = () => { Object.assign(state, { role: null, staffName: "", view: "login", loginError: "" }); render(); };
+  renderCampusToggle();
   renderTabs();
   renderViewBody();
+}
+
+function renderCampusToggle() {
+  const el = $("#campusToggle");
+  if (!el) return;
+  el.innerHTML = `
+    <span class="campus-toggle-label">Campus</span>
+    ${CAMPUSES.map(([k]) => `<button class="campus-btn ${state.campus === k ? "active" : ""}" data-campus="${k}">${k.toUpperCase()}</button>`).join("")}
+  `;
+  el.querySelectorAll(".campus-btn").forEach(btn => {
+    btn.onclick = () => {
+      state.campus = btn.dataset.campus;
+      // Update just the toggle's own markup so any in-progress form entries elsewhere on the page aren't lost.
+      renderCampusToggle();
+      toast(`Campus set to ${campusLabel(state.campus)}`);
+    };
+  });
 }
 
 function roleLabel(key) { return ROLES.find(r => r.key === key)?.name ?? key; }
@@ -714,7 +758,7 @@ function renderLogin() {
     if (!validPins.includes(pin)) { state.loginError = "Incorrect PIN for that role."; return renderLogin(); }
     state.role = state.pickedRole;
     state.loginError = "";
-    state.defaultCampus = STUDENT_PIN_CAMPUS[pin] || null;
+    state.campus = STUDENT_PIN_CAMPUS[pin] || state.campus;
     state.view = state.role === "student_worker" ? "student" : "librarian";
     render();
   };
@@ -725,56 +769,31 @@ function renderStudentForm(body) {
   body.innerHTML = `
     <div class="card">
       <h2>Circulation &amp; Supplies</h2>
-      <p class="card-sub">Log each checkout or supply hand-out as it happens. Every entry here is a physical, in-person interaction, so pick the campus it happened at.</p>
-      <div class="field-row">
-        <div>
-          <label for="scCategory">Category</label>
-          <select id="scCategory">
-            <option value="circulation">Circulation</option>
-            <option value="supplies">Supplies (scantron, bluebook, etc.)</option>
-          </select>
-        </div>
-        <div>
-          <label for="scCampus">Campus</label>
-          <select id="scCampus">${CAMPUSES.map(([k, l]) => `<option value="${k}" ${k === state.defaultCampus ? "selected" : ""}>${l}</option>`).join("")}</select>
-        </div>
-      </div>
+      <p class="card-sub">Log each checkout or supply hand-out as it happens — the date is captured automatically from the entry's timestamp.</p>
+      <label for="scCategory">Category</label>
+      <select id="scCategory">
+        <option value="circulation">Circulation</option>
+        <option value="supplies">Supplies (scantron, bluebook, etc.)</option>
+      </select>
 
       <div id="scCircWrap">
-        <label>Items checked out (check all that apply, adjust counts as needed)</label>
-        <div class="item-grid" id="scCircItems">
-          ${CIRCULATION_ITEMS.map(([k, l]) => `
-            <label class="item-check">
-              <input type="checkbox" data-item-check="${k}" />
-              <span>${l}</span>
-              <input type="number" min="1" value="1" class="item-count" data-item-count="${k}" disabled />
-            </label>`).join("")}
-        </div>
+        <label for="scCircItems">Items checked out</label>
+        <select id="scCircItems" multiple size="9">
+          ${CIRCULATION_ITEMS.map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}
+        </select>
+        <p class="help-text">Hold Ctrl (Windows) or Cmd (Mac) and click to select more than one — or tap each item on a touchscreen.</p>
       </div>
 
       <div id="scSupplyWrap" style="display:none">
-        <div class="field-row">
-          <div>
-            <label for="scItem">Item</label>
-            <select id="scItem">${SUPPLY_ITEMS.map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select>
-          </div>
-          <div>
-            <label for="scCount">Count</label>
-            <input id="scCount" type="number" min="1" value="1" />
-          </div>
-        </div>
+        <label for="scSupplyItems">Items given out</label>
+        <select id="scSupplyItems" multiple size="4">
+          ${SUPPLY_ITEMS.map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}
+        </select>
+        <p class="help-text">Hold Ctrl (Windows) or Cmd (Mac) and click to select more than one — or tap each item on a touchscreen.</p>
       </div>
 
-      <div class="field-row">
-        <div>
-          <label for="scDate">Date</label>
-          <input id="scDate" type="date" value="${todayStr()}" />
-        </div>
-        <div>
-          <label for="scNotes">Notes (optional)</label>
-          <input id="scNotes" placeholder="e.g. title, patron type" />
-        </div>
-      </div>
+      <label for="scNotes">Notes (optional)</label>
+      <input id="scNotes" placeholder="e.g. title, patron type" />
       <button class="btn-stamp" id="scSubmit">Log entry</button>
     </div>
     <div class="card">
@@ -794,42 +813,23 @@ function renderStudentForm(body) {
   refreshCategoryVisibility();
   $("#scCategory").onchange = refreshCategoryVisibility;
 
-  $("#scCircItems").querySelectorAll("[data-item-check]").forEach(cb => {
-    cb.onchange = () => {
-      $(`[data-item-count="${cb.dataset.itemCheck}"]`).disabled = !cb.checked;
-    };
-  });
-
   $("#scSubmit").onclick = async () => {
     const btn = $("#scSubmit");
     btn.disabled = true;
     try {
-      const entry_date = $("#scDate").value || todayStr();
-      const campus = $("#scCampus").value;
+      const entry_date = todayStr();
+      const campus = state.campus;
       const notes = $("#scNotes").value || null;
       const category = $("#scCategory").value;
+      const selectEl = category === "circulation" ? $("#scCircItems") : $("#scSupplyItems");
+      const selected = [...selectEl.selectedOptions].map(o => o.value);
 
-      if (category === "circulation") {
-        const checked = [...$("#scCircItems").querySelectorAll("[data-item-check]:checked")];
-        if (!checked.length) { toast("Check at least one item first", true); btn.disabled = false; return; }
-        for (const cb of checked) {
-          const key = cb.dataset.itemCheck;
-          const count = Math.max(1, parseInt($(`[data-item-count="${key}"]`).value, 10) || 1);
-          await insertInteraction({ entry_date, role: state.role, staff_name: state.staffName, category, subcategory: key, count, notes, campus });
-        }
-        toast(`Logged ${checked.length} item${checked.length > 1 ? "s" : ""} ✓`);
-        checked.forEach(cb => {
-          cb.checked = false;
-          const countInput = $(`[data-item-count="${cb.dataset.itemCheck}"]`);
-          countInput.disabled = true;
-          countInput.value = 1;
-        });
-      } else {
-        const subcategory = $("#scItem").value;
-        const count = Math.max(1, parseInt($("#scCount").value, 10) || 1);
-        await insertInteraction({ entry_date, role: state.role, staff_name: state.staffName, category, subcategory, count, notes, campus });
-        toast("Logged ✓");
+      if (!selected.length) { toast("Select at least one item first", true); btn.disabled = false; return; }
+      for (const key of selected) {
+        await insertInteraction({ entry_date, role: state.role, staff_name: state.staffName, category, subcategory: key, count: 1, notes, campus });
       }
+      toast(`Logged ${selected.length} item${selected.length > 1 ? "s" : ""} ✓`);
+      [...selectEl.options].forEach(o => { o.selected = false; });
       $("#scNotes").value = "";
       loadStudentTable();
     } catch (err) {
@@ -871,11 +871,7 @@ function renderLibrarianForm(body) {
     <div class="card">
       <h2>Library Patron Counts</h2>
       <p class="card-sub">Enter how many patrons were in each section this hour — the total below adds itself up as you go.</p>
-      <div class="field-row three">
-        <div>
-          <label for="pcCampus">Campus</label>
-          <select id="pcCampus">${CAMPUSES.map(([k, l]) => `<option value="${k}" ${k === state.defaultCampus ? "selected" : ""}>${l}</option>`).join("")}</select>
-        </div>
+      <div class="field-row">
         <div>
           <label for="pcDate">Date</label>
           <input id="pcDate" type="date" value="${todayStr()}" />
@@ -922,7 +918,7 @@ function renderLibrarianForm(body) {
     try {
       const entry_date = $("#pcDate").value || todayStr();
       const entry_hour = parseInt($("#pcHour").value, 10);
-      const campus = $("#pcCampus").value;
+      const campus = state.campus;
       const notes = $("#pcNotes").value || null;
 
       let total = 0;
@@ -979,11 +975,7 @@ function renderReferenceForm(body) {
     <div class="card">
       <h2>Reference Interactions</h2>
       <p class="card-sub">Log each reference interaction as it happens. No patron count needed — one entry equals one interaction.</p>
-      <div class="field-row three">
-        <div>
-          <label for="rfCampus">Campus</label>
-          <select id="rfCampus">${CAMPUSES.map(([k, l]) => `<option value="${k}" ${k === state.defaultCampus ? "selected" : ""}>${l}</option>`).join("")}</select>
-        </div>
+      <div class="field-row">
         <div>
           <label for="rfDate">Date</label>
           <input id="rfDate" type="date" value="${todayStr()}" />
@@ -1032,7 +1024,7 @@ function renderReferenceForm(body) {
         subcategory: selectedType,
         count: 1,
         notes: $("#rfNotes").value || null,
-        campus: $("#rfCampus").value,
+        campus: state.campus,
       });
       toast("Logged ✓");
       $("#rfNotes").value = "";
@@ -1080,19 +1072,11 @@ function renderReportsImport(body) {
         page-level interactions, peak usage times, ebook/article circulation, chat widget stats, or
         Conexed appointment stats. The file needs a <code>date</code> column and a <code>count</code>
         column at minimum — optional <code>hour</code>, <code>label</code>, and <code>campus</code>
-        columns will be mapped in too.
+        columns will be mapped in too. Physical report types (circulation, door counts) use the campus
+        toggle at the top of the page unless the file has its own <code>campus</code> column.
       </p>
-      <div class="field-row">
-        <div>
-          <label for="riType">Report type</label>
-          <select id="riType">${REPORT_TYPES.map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select>
-        </div>
-        <div id="riCampusWrap" style="display:none">
-          <label for="riCampus">Campus</label>
-          <select id="riCampus">${CAMPUSES.map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select>
-          <p class="help-text">Applies to every row, unless the file has its own <code>campus</code> column.</p>
-        </div>
-      </div>
+      <label for="riType">Report type</label>
+      <select id="riType">${REPORT_TYPES.map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select>
       <label>File</label>
       <div class="upload-drop" id="riDrop">
         <input type="file" id="riFile" accept=".csv" />
@@ -1101,10 +1085,6 @@ function renderReportsImport(body) {
       <div id="riPreview"></div>
     </div>
   `;
-  const campusWrap = $("#riCampusWrap");
-  const refreshCampusVisibility = () => { campusWrap.style.display = PHYSICAL_REPORT_TYPES.has($("#riType").value) ? "" : "none"; };
-  refreshCampusVisibility();
-  $("#riType").onchange = refreshCampusVisibility;
 
   const drop = $("#riDrop");
   const fileInput = $("#riFile");
@@ -1135,7 +1115,7 @@ function renderReportsImport(body) {
       <p class="help-text">${rows.length} rows detected${bad.length ? `, <span style="color:var(--stamp-red)">${bad.length} missing date/count and will be skipped</span>` : ""}.</p>
       <table><thead><tr><th>Date</th><th>Hour</th><th>Label</th>${isPhysical ? "<th>Campus</th>" : ""}<th class="num">Count</th></tr></thead>
       <tbody>${rows.slice(0, 8).map(r => `
-        <tr><td>${r.entry_date || "—"}</td><td>${r.entry_hour ?? "—"}</td><td>${r.label || "—"}</td>${isPhysical ? `<td>${r.campus ? campusLabel(r.campus) : "(uses form selection)"}</td>` : ""}<td class="num">${isNaN(r.count) ? "—" : r.count}</td></tr>
+        <tr><td>${r.entry_date || "—"}</td><td>${r.entry_hour ?? "—"}</td><td>${r.label || "—"}</td>${isPhysical ? `<td>${r.campus ? campusLabel(r.campus) : "(uses campus toggle: " + campusLabel(state.campus) + ")"}</td>` : ""}<td class="num">${isNaN(r.count) ? "—" : r.count}</td></tr>
       `).join("")}</tbody></table>
       ${rows.length > 8 ? `<p class="help-text">…and ${rows.length - 8} more.</p>` : ""}
       <button class="btn-stamp" id="riConfirm">Import ${rows.length - bad.length} rows</button>
@@ -1149,7 +1129,7 @@ function renderReportsImport(body) {
     try {
       const reportType = $("#riType").value;
       const isPhysical = PHYSICAL_REPORT_TYPES.has(reportType);
-      const formCampus = isPhysical ? $("#riCampus").value : null;
+      const formCampus = isPhysical ? state.campus : null;
       const batch = await run(
         `INSERT INTO report_uploads (file_name, report_type, uploaded_by, row_count) VALUES (?, ?, ?, ?)`,
         [fileName, reportType, state.staffName, rows.length]
