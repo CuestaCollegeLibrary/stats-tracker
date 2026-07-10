@@ -388,18 +388,27 @@ td.num, th.num { font-family: var(--font-mono); text-align: right; }
 .campus-btn.active { background: var(--forest); color: var(--paper-raised); }
 .campus-btn:not(.active):hover { color: var(--forest); }
 
-/* ── Multi-select item dropdowns (circulation & supplies) ────────── */
-select[multiple] {
-  padding: 4px;
+/* ── Checkbox item grid (circulation & supplies) ──────────────────── */
+.check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+  margin-bottom: 6px;
 }
-select[multiple] option {
-  padding: 7px 9px;
-  border-radius: 2px;
+.check-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--card-line);
+  border-radius: 3px;
+  padding: 9px 12px;
+  background: #fff;
+  font-size: 0.88rem;
+  cursor: pointer;
 }
-select[multiple] option:checked {
-  background: var(--forest) linear-gradient(0deg, var(--forest) 0%, var(--forest) 100%);
-  color: var(--paper-raised);
-}
+.check-item:has(input:checked) { border-color: var(--forest); background: #f0f5f1; }
+.check-item input[type="checkbox"] { width: auto; flex: none; accent-color: var(--forest); }
+.check-item span { flex: 1; }
 
 /* ── Section count grid (patron counts) ──────────────────────────── */
 .section-grid {
@@ -777,19 +786,25 @@ function renderStudentForm(body) {
       </select>
 
       <div id="scCircWrap">
-        <label for="scCircItems">Items checked out</label>
-        <select id="scCircItems" multiple size="9">
-          ${CIRCULATION_ITEMS.map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}
-        </select>
-        <p class="help-text">Hold Ctrl (Windows) or Cmd (Mac) and click to select more than one — or tap each item on a touchscreen.</p>
+        <label>Items checked out (check all that apply)</label>
+        <div class="check-grid" id="scCircItems">
+          ${CIRCULATION_ITEMS.map(([k, l]) => `
+            <label class="check-item">
+              <input type="checkbox" value="${k}" />
+              <span>${l}</span>
+            </label>`).join("")}
+        </div>
       </div>
 
       <div id="scSupplyWrap" style="display:none">
-        <label for="scSupplyItems">Items given out</label>
-        <select id="scSupplyItems" multiple size="4">
-          ${SUPPLY_ITEMS.map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}
-        </select>
-        <p class="help-text">Hold Ctrl (Windows) or Cmd (Mac) and click to select more than one — or tap each item on a touchscreen.</p>
+        <label>Items given out (check all that apply)</label>
+        <div class="check-grid" id="scSupplyItems">
+          ${SUPPLY_ITEMS.map(([k, l]) => `
+            <label class="check-item">
+              <input type="checkbox" value="${k}" />
+              <span>${l}</span>
+            </label>`).join("")}
+        </div>
       </div>
 
       <label for="scNotes">Notes (optional)</label>
@@ -821,15 +836,16 @@ function renderStudentForm(body) {
       const campus = state.campus;
       const notes = $("#scNotes").value || null;
       const category = $("#scCategory").value;
-      const selectEl = category === "circulation" ? $("#scCircItems") : $("#scSupplyItems");
-      const selected = [...selectEl.selectedOptions].map(o => o.value);
+      const wrapEl = category === "circulation" ? $("#scCircItems") : $("#scSupplyItems");
+      const checked = [...wrapEl.querySelectorAll("input[type=checkbox]:checked")];
+      const selected = checked.map(cb => cb.value);
 
       if (!selected.length) { toast("Select at least one item first", true); btn.disabled = false; return; }
       for (const key of selected) {
         await insertInteraction({ entry_date, role: state.role, staff_name: state.staffName, category, subcategory: key, count: 1, notes, campus });
       }
       toast(`Logged ${selected.length} item${selected.length > 1 ? "s" : ""} ✓`);
-      [...selectEl.options].forEach(o => { o.selected = false; });
+      checked.forEach(cb => { cb.checked = false; });
       $("#scNotes").value = "";
       loadStudentTable();
     } catch (err) {
