@@ -388,27 +388,30 @@ td.num, th.num { font-family: var(--font-mono); text-align: right; }
 .campus-btn.active { background: var(--forest); color: var(--paper-raised); }
 .campus-btn:not(.active):hover { color: var(--forest); }
 
-/* ── Checkbox item grid (circulation & supplies) ──────────────────── */
-.check-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+/* ── Pill tag multi-select (circulation & supplies items) ─────────── */
+.pill-picker {
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 6px;
 }
-.check-item {
-  display: flex;
+.pill-option {
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  padding: 9px 16px;
   border: 1px solid var(--card-line);
-  border-radius: 3px;
-  padding: 9px 12px;
+  border-radius: 20px;
   background: #fff;
-  font-size: 0.88rem;
+  color: var(--ink);
   cursor: pointer;
 }
-.check-item:has(input:checked) { border-color: var(--forest); background: #f0f5f1; }
-.check-item input[type="checkbox"] { width: auto; flex: none; accent-color: var(--forest); }
-.check-item span { flex: 1; }
+.pill-option:hover { border-color: var(--brass); }
+.pill-option.selected { background: var(--forest); border-color: var(--forest); color: var(--paper-raised); }
+.pill-option .pill-check { display: none; font-size: 0.8rem; }
+.pill-option.selected .pill-check { display: inline; }
 
 /* ── Section count grid (patron counts) ──────────────────────────── */
 .section-grid {
@@ -786,24 +789,16 @@ function renderStudentForm(body) {
       </select>
 
       <div id="scCircWrap">
-        <label>Items checked out (check all that apply)</label>
-        <div class="check-grid" id="scCircItems">
-          ${CIRCULATION_ITEMS.map(([k, l]) => `
-            <label class="check-item">
-              <input type="checkbox" value="${k}" />
-              <span>${l}</span>
-            </label>`).join("")}
+        <label>Items checked out (tap all that apply)</label>
+        <div class="pill-picker" id="scCircItems">
+          ${CIRCULATION_ITEMS.map(([k, l]) => `<button type="button" class="pill-option" data-value="${k}"><span class="pill-check">✓</span>${l}</button>`).join("")}
         </div>
       </div>
 
       <div id="scSupplyWrap" style="display:none">
-        <label>Items given out (check all that apply)</label>
-        <div class="check-grid" id="scSupplyItems">
-          ${SUPPLY_ITEMS.map(([k, l]) => `
-            <label class="check-item">
-              <input type="checkbox" value="${k}" />
-              <span>${l}</span>
-            </label>`).join("")}
+        <label>Items given out (tap all that apply)</label>
+        <div class="pill-picker" id="scSupplyItems">
+          ${SUPPLY_ITEMS.map(([k, l]) => `<button type="button" class="pill-option" data-value="${k}"><span class="pill-check">✓</span>${l}</button>`).join("")}
         </div>
       </div>
 
@@ -828,6 +823,12 @@ function renderStudentForm(body) {
   refreshCategoryVisibility();
   $("#scCategory").onchange = refreshCategoryVisibility;
 
+  [$("#scCircItems"), $("#scSupplyItems")].forEach(wrap => {
+    wrap.querySelectorAll(".pill-option").forEach(pill => {
+      pill.onclick = () => pill.classList.toggle("selected");
+    });
+  });
+
   $("#scSubmit").onclick = async () => {
     const btn = $("#scSubmit");
     btn.disabled = true;
@@ -837,15 +838,15 @@ function renderStudentForm(body) {
       const notes = $("#scNotes").value || null;
       const category = $("#scCategory").value;
       const wrapEl = category === "circulation" ? $("#scCircItems") : $("#scSupplyItems");
-      const checked = [...wrapEl.querySelectorAll("input[type=checkbox]:checked")];
-      const selected = checked.map(cb => cb.value);
+      const selectedPills = [...wrapEl.querySelectorAll(".pill-option.selected")];
+      const selected = selectedPills.map(p => p.dataset.value);
 
       if (!selected.length) { toast("Select at least one item first", true); btn.disabled = false; return; }
       for (const key of selected) {
         await insertInteraction({ entry_date, role: state.role, staff_name: state.staffName, category, subcategory: key, count: 1, notes, campus });
       }
       toast(`Logged ${selected.length} item${selected.length > 1 ? "s" : ""} ✓`);
-      checked.forEach(cb => { cb.checked = false; });
+      selectedPills.forEach(p => { p.classList.remove("selected"); });
       $("#scNotes").value = "";
       loadStudentTable();
     } catch (err) {
