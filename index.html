@@ -554,12 +554,13 @@ async function run(sql, args = []) {
 async function insertInteraction(row) {
   return run(
     `INSERT INTO interactions
-      (entry_date, entry_hour, entry_time, role, staff_name, category, subcategory, count, notes, source, report_batch_id, campus, read_scale)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (entry_date, entry_hour, entry_time, role, staff_name, category, subcategory, count, notes, source, report_batch_id, campus, read_scale, subject_area)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       row.entry_date, row.entry_hour ?? null, row.entry_time ?? null, row.role, row.staff_name ?? null,
       row.category, row.subcategory ?? null, row.count, row.notes ?? null,
       row.source ?? "manual", row.report_batch_id ?? null, row.campus ?? null, row.read_scale ?? null,
+      row.subject_area ?? null,
     ]
   );
 }
@@ -567,7 +568,7 @@ async function insertInteraction(row) {
 async function todaysEntries() {
   const today = todayStr();
   const res = await run(
-    `SELECT id, entry_hour, entry_time, category, subcategory, count, notes, campus, read_scale, created_at
+    `SELECT id, entry_hour, entry_time, category, subcategory, count, notes, campus, read_scale, subject_area, created_at
      FROM interactions
      WHERE entry_date = ?
      ORDER BY created_at DESC LIMIT 100`,
@@ -627,12 +628,13 @@ const SUPPLY_ITEMS = [
 // overall patron count are now the same form: fill in each section, and
 // the total is the sum.
 const LIBRARY_SECTIONS = [
-  ["computer_lab", "Computer Lab"],
+  ["computers_printing", "Computers/Printing"],
   ["study_rooms", "Study Rooms"],
   ["quiet_study", "Quiet Study"],
   ["open_lab", "Open Lab"],
-  ["zine_table", "Zine Table"],
-  ["printing_area", "Printing Area"],
+  ["zine_makerspace", "Zine/Makerspace"],
+  ["childrens_area", "Children's Area"],
+  ["events", "Events"],
 ];
 
 const REFERENCE_TYPES = [
@@ -1036,6 +1038,8 @@ function renderReferenceForm(body) {
             <span class="read-scale-desc">${desc}</span>
           </button>`).join("")}
       </div>
+      <label for="rfSubject">Subject area (optional)</label>
+      <input id="rfSubject" placeholder="e.g. Biology, U.S. History, Nursing" />
       <label for="rfNotes">Notes (optional)</label>
       <input id="rfNotes" placeholder="e.g. topic, context" />
       <button class="btn-stamp" id="rfSubmit">Log interaction</button>
@@ -1078,11 +1082,13 @@ function renderReferenceForm(body) {
         category: "reference",
         subcategory: selectedType,
         read_scale: selectedReadScale,
+        subject_area: $("#rfSubject").value || null,
         count: 1,
         notes: $("#rfNotes").value || null,
         campus: state.campus,
       });
       toast("Logged ✓");
+      $("#rfSubject").value = "";
       $("#rfNotes").value = "";
       $("#rfTime").value = nowHHMM();
       selectedType = null;
@@ -1111,13 +1117,14 @@ async function loadReferenceTable() {
     : "";
 
   $("#rfTable").innerHTML = rows.length ? `
-    <table><thead><tr><th>Time</th><th>Campus</th><th>Type</th><th class="num">READ</th><th>Notes</th></tr></thead>
+    <table><thead><tr><th>Time</th><th>Campus</th><th>Type</th><th class="num">READ</th><th>Subject</th><th>Notes</th></tr></thead>
     <tbody>${rows.map(r => `
       <tr>
         <td>${r.entry_time || (r.entry_hour !== null ? hourOptions()[r.entry_hour][1] : "—")}</td>
         <td>${campusLabel(r.campus)}</td>
         <td>${typeLabel(r.subcategory)}</td>
         <td class="num" title="${escapeHtml(readScaleDesc(r.read_scale))}">${r.read_scale ?? "—"}</td>
+        <td>${escapeHtml(r.subject_area || "")}</td>
         <td>${escapeHtml(r.notes || "")}</td>
       </tr>`).join("")}</tbody></table>
   ` : `<div class="empty-state">No interactions logged yet today.</div>`;
