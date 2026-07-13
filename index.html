@@ -257,21 +257,6 @@ input[type="number"] { font-family: var(--font-mono); }
   min-height: 70vh;
 }
 .login-card { width: 100%; max-width: 420px; }
-.role-picker { display: grid; gap: 8px; margin-bottom: 4px; }
-.role-option {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  border: 1px solid var(--card-line);
-  border-radius: 3px;
-  padding: 12px 14px;
-  cursor: pointer;
-  background: #fff;
-}
-.role-option:hover { border-color: var(--brass); }
-.role-option.selected { border-color: var(--forest); background: #f0f5f1; }
-.role-option .role-name { font-weight: 600; font-family: var(--font-display); }
-.role-option .role-desc { font-size: 0.78rem; color: var(--ink-soft); }
 
 .error-msg {
   font-family: var(--font-mono);
@@ -517,14 +502,11 @@ const CONFIG = {
 
   TURSO_AUTH_TOKEN: "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODM2MzQ5NjYsImlkIjoiMDE5ZjQ4ZDUtYTgwMS03NmM0LWE3YjEtZDEzNjEyMGY2YjRlIiwia2lkIjoiMktaRFFnQUt0ZEo5MXZvRURuZER6N2laTktYUDNUUnRfYXhKY0EzcEdZMCIsInJpZCI6ImZhNjcyNTIxLTczYjctNDlkNC1iMjNiLTQzNTAwZTQxYjc4OSJ9.oDsTaBh5tN3hQAUxZeBMd2FT58wAGhO6RFbJSnppYKQJyMiAn40F_krZNiA4AFxvRb5a7D40QA09WIIZirQzCw",
 
-  // Each role can have one or more valid PINs — anyone entering any PIN
-  // in a role's list is let in as that role. Student workers get two PINs
-  // (one per campus) so their campus can default automatically at login.
-  PINS: {
-    student_worker: ["slocirc1", "ncccirc1"],
-    librarian: ["librarians"],
-    tech_services: ["Cougar007@"],
-  },
+  // One shared PIN list for everyone — no more separate roles/profiles.
+  // Anyone entering any PIN on this list gets in. slocirc1/ncccirc1 are
+  // kept as-is so they still auto-set the campus toggle at login (see
+  // STUDENT_PIN_CAMPUS below); add or remove PINs freely.
+  PINS: ["slocirc1", "ncccirc1", "librarians", "Cougar007@"],
 };
 
 import { createClient } from "https://esm.sh/@libsql/client@0.14.0/web";
@@ -567,7 +549,6 @@ async function todaysEntries(role, staffName) {
 async function dashboardRows(filters) {
   const clauses = ["entry_date BETWEEN ? AND ?"];
   const args = [filters.from, filters.to];
-  if (filters.role) { clauses.push("role = ?"); args.push(filters.role); }
   if (filters.category) { clauses.push("category = ?"); args.push(filters.category); }
   if (filters.campus) { clauses.push("campus = ?"); args.push(filters.campus); }
   const res = await run(
@@ -598,18 +579,17 @@ async function weeklyLogEntries(campus, from, to) {
 }
 
 /* ── LOOKUP DATA ──────────────────────────────────────────────────── */
-const ROLES = [
-  { key: "student_worker", name: "Student Worker", desc: "Circulation & supply counts" },
-  { key: "librarian", name: "Librarian", desc: "Patron counts & reference interactions" },
-  { key: "tech_services", name: "Technical Services", desc: "All of the above, plus report imports" },
-];
+// Profiles are gone — everyone shares one page with every tab. This constant
+// just fills the `role` column in the database so existing queries/exports
+// built around it don't break; it's no longer used to gate access to anything.
+const GENERIC_ROLE = "staff";
 
 const CAMPUSES = [
   ["slo", "San Luis Obispo Campus"],
   ["ncc", "North County Campus"],
 ];
 
-// Which student-worker PIN implies which campus, so the campus field can
+// Which PIN implies which campus, so the campus field can
 // default sensibly at login (still editable per entry).
 const STUDENT_PIN_CAMPUS = { slocirc1: "slo", ncccirc1: "ncc" };
 
@@ -691,11 +671,9 @@ function nowHHMM() {
 
 /* ── STATE ────────────────────────────────────────────────────────── */
 const state = {
-  role: null,
   staffName: "",
-  view: "login",       // login | student | librarian | reference | reports | dashboard
+  view: "login",       // login | student | librarian | reference | weekly | reports | dashboard
   loginError: "",
-  pickedRole: null,
   campus: "slo",        // the currently-toggled campus — applied to every physical stat entry
 };
 
@@ -724,14 +702,14 @@ function render() {
       <div class="campus-toggle" id="campusToggle"></div>
       <div class="session-tag">
         <span class="date-stamp">${todayStr()}</span>
-        <span>${state.staffName ? escapeHtml(state.staffName) + " · " : ""}${roleLabel(state.role)}</span>
+        <span>${escapeHtml(state.staffName)}</span>
         <button id="logoutBtn">Log out</button>
       </div>
     </div>
     <div class="tabs" id="tabs"></div>
     <div id="viewBody"></div>
   `;
-  $("#logoutBtn").onclick = () => { Object.assign(state, { role: null, staffName: "", view: "login", loginError: "" }); render(); };
+  $("#logoutBtn").onclick = () => { Object.assign(state, { staffName: "", view: "login", loginError: "" }); render(); };
   renderCampusToggle();
   renderTabs();
   renderViewBody();
@@ -754,34 +732,20 @@ function renderCampusToggle() {
   });
 }
 
-function roleLabel(key) { return ROLES.find(r => r.key === key)?.name ?? key; }
+// One shared set of tabs — no more role-based filtering, everyone sees
+// every stat-tracking feature on the same page.
+const TABS = [
+  ["student", "Circulation & Supplies"],
+  ["librarian", "Patron Counts"],
+  ["reference", "Reference Interactions"],
+  ["weekly", "Weekly Log"],
+  ["reports", "Report Imports"],
+  ["dashboard", "Dashboard"],
+];
 
 function renderTabs() {
   const tabsEl = $("#tabs");
-  let tabs = [];
-  if (state.role === "tech_services") {
-    tabs = [
-      ["student", "Circulation & Supplies"],
-      ["librarian", "Patron Counts"],
-      ["reference", "Reference Interactions"],
-      ["weekly", "Weekly Log"],
-      ["reports", "Report Imports"],
-      ["dashboard", "Dashboard"],
-    ];
-  } else if (state.role === "student_worker") {
-    tabs = [
-      ["student", "Log Entry"],
-      ["weekly", "Weekly Log"],
-    ];
-  } else if (state.role === "librarian") {
-    tabs = [
-      ["librarian", "Patron Counts"],
-      ["reference", "Reference Interactions"],
-      ["weekly", "Weekly Log"],
-      ["dashboard", "Dashboard"],
-    ];
-  }
-  tabsEl.innerHTML = tabs.map(([key, label]) =>
+  tabsEl.innerHTML = TABS.map(([key, label]) =>
     `<button class="tab ${key === state.view ? "active" : ""}" data-tab="${key}">${label}</button>`
   ).join("");
   tabsEl.querySelectorAll(".tab").forEach(btn => {
@@ -806,8 +770,7 @@ function renderLogin() {
       <div class="card login-card">
         <span class="eyebrow">Cuesta College Library</span>
         <h2>Sign in to log activity</h2>
-        <p class="card-sub">Pick your role, enter your name and the shared team PIN.</p>
-        <div class="role-picker" id="rolePicker"></div>
+        <p class="card-sub">Enter your name and the shared team PIN to get started.</p>
         <label for="staffName">Your name</label>
         <input id="staffName" placeholder="e.g. Del B." value="${escapeHtml(state.staffName)}" />
         <label for="pin">Team PIN</label>
@@ -820,15 +783,6 @@ function renderLogin() {
       </div>
     </div>
   `;
-  const picker = $("#rolePicker");
-  picker.innerHTML = ROLES.map(r => `
-    <div class="role-option ${state.pickedRole === r.key ? "selected" : ""}" data-role="${r.key}">
-      <div><div class="role-name">${r.name}</div><div class="role-desc">${r.desc}</div></div>
-      <div>${state.pickedRole === r.key ? "✓" : ""}</div>
-    </div>`).join("");
-  picker.querySelectorAll(".role-option").forEach(el => {
-    el.onclick = () => { state.pickedRole = el.dataset.role; renderLogin(); };
-  });
   $("#staffName").oninput = (e) => { state.staffName = e.target.value; };
 
   $("#pinToggle").onclick = () => {
@@ -841,13 +795,10 @@ function renderLogin() {
 
   const attemptLogin = () => {
     const pin = $("#pin").value.trim();
-    if (!state.pickedRole) { state.loginError = "Pick a role first."; return renderLogin(); }
-    const validPins = CONFIG.PINS[state.pickedRole] || [];
-    if (!validPins.includes(pin)) { state.loginError = "Incorrect PIN for that role."; return renderLogin(); }
-    state.role = state.pickedRole;
+    if (!CONFIG.PINS.includes(pin)) { state.loginError = "Incorrect PIN."; return renderLogin(); }
     state.loginError = "";
     state.campus = STUDENT_PIN_CAMPUS[pin] || state.campus;
-    state.view = (state.role === "student_worker" || state.role === "tech_services") ? "student" : "librarian";
+    state.view = "student";
     render();
   };
 
@@ -856,7 +807,7 @@ function renderLogin() {
   $("#pin").addEventListener("keydown", (e) => { if (e.key === "Enter") attemptLogin(); });
 }
 
-/* ── STUDENT WORKER FORM (Circulation & Supplies) ─────────────────── */
+/* ── CIRCULATION & SUPPLIES FORM ──────────────────────────────────── */
 function renderStudentForm(body) {
   body.innerHTML = `
     <div class="card">
@@ -923,7 +874,7 @@ function renderStudentForm(body) {
 
       if (!selected.length) { toast("Select at least one item first", true); btn.disabled = false; return; }
       for (const key of selected) {
-        await insertInteraction({ entry_date, role: state.role, staff_name: state.staffName, category, subcategory: key, count: 1, notes, campus });
+        await insertInteraction({ entry_date, role: GENERIC_ROLE, staff_name: state.staffName, category, subcategory: key, count: 1, notes, campus });
       }
       toast(`Logged ${selected.length} item${selected.length > 1 ? "s" : ""} ✓`);
       selectedPills.forEach(p => { p.classList.remove("selected"); });
@@ -939,7 +890,7 @@ function renderStudentForm(body) {
 }
 
 async function loadStudentTable() {
-  const rows = await todaysEntries(state.role, state.staffName);
+  const rows = await todaysEntries(GENERIC_ROLE, state.staffName);
   const totalsMap = {};
   rows.forEach(r => { totalsMap[r.subcategory] = (totalsMap[r.subcategory] || 0) + r.count; });
   const label = (k) => [...CIRCULATION_ITEMS, ...SUPPLY_ITEMS].find(i => i[0] === k)?.[1] || k;
@@ -1023,10 +974,10 @@ function renderLibrarianForm(body) {
         const count = parseInt(el.value, 10) || 0;
         total += count;
         if (count > 0) {
-          await insertInteraction({ entry_date, entry_hour, role: state.role, staff_name: state.staffName, category: "patron_count", subcategory: el.dataset.section, count, notes, campus });
+          await insertInteraction({ entry_date, entry_hour, role: GENERIC_ROLE, staff_name: state.staffName, category: "patron_count", subcategory: el.dataset.section, count, notes, campus });
         }
       }
-      await insertInteraction({ entry_date, entry_hour, role: state.role, staff_name: state.staffName, category: "patron_count", subcategory: "total_patrons", count: total, notes, campus });
+      await insertInteraction({ entry_date, entry_hour, role: GENERIC_ROLE, staff_name: state.staffName, category: "patron_count", subcategory: "total_patrons", count: total, notes, campus });
 
       toast("Logged hourly counts ✓");
       sectionInputs.forEach(el => { el.value = 0; });
@@ -1043,7 +994,7 @@ function renderLibrarianForm(body) {
 }
 
 async function loadLibrarianTable() {
-  const rows = await todaysEntries(state.role, state.staffName);
+  const rows = await todaysEntries(GENERIC_ROLE, state.staffName);
   const patronRows = rows.filter(r => r.category === "patron_count");
   const sectionLabel = (k) => k === "total_patrons" ? "Total Patrons" : (LIBRARY_SECTIONS.find(s => s[0] === k)?.[1] || k);
 
@@ -1115,7 +1066,7 @@ function renderReferenceForm(body) {
         entry_date: $("#rfDate").value || todayStr(),
         entry_hour: parseInt(time.split(":")[0], 10),
         entry_time: time,
-        role: state.role,
+        role: GENERIC_ROLE,
         staff_name: state.staffName,
         category: "reference",
         subcategory: selectedType,
@@ -1139,7 +1090,7 @@ function renderReferenceForm(body) {
 }
 
 async function loadReferenceTable() {
-  const rows = (await todaysEntries(state.role, state.staffName)).filter(r => r.category === "reference");
+  const rows = (await todaysEntries(GENERIC_ROLE, state.staffName)).filter(r => r.category === "reference");
   const typeLabel = (k) => REFERENCE_TYPES.find(t => t[0] === k)?.[1] || k;
 
   const totalsMap = {};
@@ -1196,7 +1147,7 @@ function renderWeeklyLog(body) {
     const btn = $("#wlSubmit");
     btn.disabled = true;
     try {
-      await insertWeeklyLogEntry({ campus: state.campus, role: state.role, staff_name: state.staffName, entry_text: text });
+      await insertWeeklyLogEntry({ campus: state.campus, role: GENERIC_ROLE, staff_name: state.staffName, entry_text: text });
       $("#wlText").value = "";
       toast("Posted ✓");
       loadWeeklyLog(from, to);
@@ -1213,7 +1164,7 @@ async function loadWeeklyLog(from, to) {
   const rows = await weeklyLogEntries(state.campus, from, to);
   $("#wlEntries").innerHTML = rows.length ? rows.map(r => `
     <div class="log-entry">
-      <div class="log-entry-meta"><b>${escapeHtml(r.staff_name || "Unknown")}</b> · ${roleLabel(r.role)} · ${fmtDateTime(r.created_at)}</div>
+      <div class="log-entry-meta"><b>${escapeHtml(r.staff_name || "Unknown")}</b> · ${fmtDateTime(r.created_at)}</div>
       <div class="log-entry-text">${escapeHtml(r.entry_text)}</div>
     </div>`).join("") : `<div class="empty-state">No entries yet this week.</div>`;
 }
@@ -1294,7 +1245,7 @@ function renderReportsImport(body) {
         await insertInteraction({
           entry_date: r.entry_date,
           entry_hour: r.entry_hour,
-          role: state.role,
+          role: GENERIC_ROLE,
           staff_name: state.staffName,
           category: reportType,
           subcategory: r.label || null,
@@ -1339,11 +1290,10 @@ function renderDashboard(body) {
   body.innerHTML = `
     <div class="card">
       <h2>Dashboard</h2>
-      <p class="card-sub">Aggregated activity across all roles.</p>
-      <div class="field-row three">
+      <p class="card-sub">Aggregated activity across every stat type.</p>
+      <div class="field-row">
         <div><label for="dFrom">From</label><input id="dFrom" type="date" value="${from.toISOString().slice(0,10)}" /></div>
         <div><label for="dTo">To</label><input id="dTo" type="date" value="${todayStr()}" /></div>
-        <div><label for="dRole">Role</label><select id="dRole"><option value="">All roles</option>${ROLES.map(r => `<option value="${r.key}">${r.name}</option>`).join("")}</select></div>
       </div>
       <div class="field-row">
         <div>
@@ -1371,7 +1321,7 @@ function renderDashboard(body) {
   async function run_() {
     const filters = {
       from: $("#dFrom").value, to: $("#dTo").value,
-      role: $("#dRole").value, category: $("#dCategory").value, campus: $("#dCampus").value,
+      category: $("#dCategory").value, campus: $("#dCampus").value,
     };
     const rows = await dashboardRows(filters);
 
