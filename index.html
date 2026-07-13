@@ -591,6 +591,58 @@ async function dashboardRows(filters) {
   return res.rows;
 }
 
+// Campus-by-campus totals for a date range, ignoring any campus filter
+// (the whole point is to compare campuses against each other).
+async function campusTotals(from, to, category) {
+  const clauses = ["entry_date BETWEEN ? AND ?", "campus IS NOT NULL"];
+  const args = [from, to];
+  if (category) { clauses.push("category = ?"); args.push(category); }
+  const res = await run(
+    `SELECT campus, SUM(count) as total FROM interactions WHERE ${clauses.join(" AND ")} GROUP BY campus`,
+    args
+  );
+  return res.rows;
+}
+
+// Reference-interaction-specific breakdown: by type, by READ Scale, and top subject areas.
+async function referenceBreakdown(from, to, campus) {
+  const clauses = ["entry_date BETWEEN ? AND ?", "category = 'reference'"];
+  const args = [from, to];
+  if (campus) { clauses.push("campus = ?"); args.push(campus); }
+  const res = await run(
+    `SELECT subcategory, read_scale, subject_area, count FROM interactions WHERE ${clauses.join(" AND ")}`,
+    args
+  );
+  return res.rows;
+}
+
+// Patron count section breakdown (excludes the total_patrons summary rows).
+async function patronSectionTotals(from, to, campus) {
+  const clauses = ["entry_date BETWEEN ? AND ?", "category = 'patron_count'", "subcategory != 'total_patrons'"];
+  const args = [from, to];
+  if (campus) { clauses.push("campus = ?"); args.push(campus); }
+  const res = await run(
+    `SELECT subcategory, SUM(count) as total FROM interactions WHERE ${clauses.join(" AND ")} GROUP BY subcategory`,
+    args
+  );
+  return res.rows;
+}
+
+// Full-column export for CSV download — everything dashboardRows leaves out.
+async function exportRows(filters) {
+  const clauses = ["entry_date BETWEEN ? AND ?"];
+  const args = [filters.from, filters.to];
+  if (filters.category) { clauses.push("category = ?"); args.push(filters.category); }
+  if (filters.campus) { clauses.push("campus = ?"); args.push(filters.campus); }
+  const res = await run(
+    `SELECT entry_date, entry_hour, entry_time, category, subcategory, count, campus, read_scale, subject_area, notes, source
+     FROM interactions WHERE ${clauses.join(" AND ")}
+     ORDER BY entry_date ASC, entry_hour ASC`,
+    args
+  );
+  return res.rows;
+}
+
 async function insertWeeklyLogEntry({ campus, role, staff_name, entry_text }) {
   return run(
     `INSERT INTO weekly_log (campus, role, staff_name, entry_text) VALUES (?, ?, ?, ?)`,
@@ -619,6 +671,44 @@ const CAMPUSES = [
   ["slo", "San Luis Obispo Campus"],
   ["ncc", "North County Campus"],
 ];
+
+// Board-approved semester dates. Add a new entry each time Cuesta approves
+// a new academic calendar — nothing else in the code needs to change.
+// `academicYear` groups Summer + Fall + the following Spring together,
+// matching how Cuesta's own board calendars are labeled (e.g. the
+// "2026-2027 Academic Calendar" covers Summer 2026 through Spring 2027).
+// Any date that doesn't fall inside one of these ranges is treated as
+// "Intersession" automatically — no need to define those gaps by hand.
+const TERMS = [
+  { key: "summer2026", label: "Summer 2026", academicYear: "2026-27", from: "2026-06-08", to: "2026-07-31" },
+  { key: "fall2026", label: "Fall 2026", academicYear: "2026-27", from: "2026-08-17", to: "2026-12-11" },
+  { key: "spring2027", label: "Spring 2027", academicYear: "2026-27", from: "2027-01-19", to: "2027-05-14" },
+];
+
+// Returns the TERMS entry containing `dateStr` ('YYYY-MM-DD'), or null if
+// the date falls in a gap between terms (i.e. intersession).
+function termForDate(dateStr) {
+  return TERMS.find(t => dateStr >= t.from && dateStr <= t.to) || null;
+}
+
+// Labels a date as its term name, or "Intersession" if it's in a gap.
+// Dates before the first defined term or after the last one are labeled
+// "Intersession" too, since there's no more specific bucket to put them in.
+function termLabelForDate(dateStr) {
+  return termForDate(dateStr)?.label || "Intersession";
+}
+
+// All distinct academic years defined in TERMS, most recent first.
+function academicYears() {
+  return [...new Set(TERMS.map(t => t.academicYear))].sort().reverse();
+}
+
+// Full date span covering every term tagged with this academic year
+// (from the earliest term's start to the latest term's end).
+function academicYearRange(ay) {
+  const terms = TERMS.filter(t => t.academicYear === ay).sort((a, b) => a.from.localeCompare(b.from));
+  return { from: terms[0].from, to: terms[terms.length - 1].to };
+}
 
 const SUPPLY_ITEMS = [
   ["scantron", "Scantron"], ["bluebook", "Blue Book"], ["notecards", "Notecards"], ["pencil", "Pencil"],
@@ -1308,12 +1398,113 @@ function normalizeCsvRows(rows) {
 }
 
 /* ── DASHBOARD ────────────────────────────────────────────────────── */
+function granularityForRange(from, to) {
+  const days = (new Date(to) - new Date(from)) / 86400000;
+  if (days <= 31) return "day";
+  if (days <= 180) return "week";
+  return "month";
+}
+
+function bucketKeyForDate(dateStr, granularity) {
+  if (granularity === "day") return dateStr;
+  const d = new Date(dateStr + "T00:00:00");
+  if (granularity === "week") {
+    const day = d.getDay();
+    d.setDate(d.getDate() - (day === 0 ? 6 : day - 1)); // Monday of that week
+    return d.toISOString().slice(0, 10);
+  }
+  return dateStr.slice(0, 7); // 'YYYY-MM'
+}
+
+function bucketLabel(key, granularity) {
+  if (granularity === "day") return new Date(key + "T00:00:00").toLocaleDateString([], { month: "short", day: "numeric" });
+  if (granularity === "week") return "Wk of " + new Date(key + "T00:00:00").toLocaleDateString([], { month: "short", day: "numeric" });
+  const [y, m] = key.split("-");
+  return new Date(y, m - 1, 1).toLocaleDateString([], { month: "short", year: "numeric" });
+}
+
+// Groups rows by term (or "Intersession" for gaps between terms), ordered
+// by each bucket's earliest date in the data rather than alphabetically.
+function groupByTerm(rows) {
+  const totals = {};
+  const firstSeen = {};
+  rows.forEach(r => {
+    const label = termLabelForDate(r.entry_date);
+    totals[label] = (totals[label] || 0) + r.count;
+    if (!firstSeen[label] || r.entry_date < firstSeen[label]) firstSeen[label] = r.entry_date;
+  });
+  const labels = Object.keys(totals).sort((a, b) => firstSeen[a].localeCompare(firstSeen[b]));
+  return { labels, totals };
+}
+
+function rowsToCsv(rows) {
+  if (!rows.length) return "";
+  const headers = Object.keys(rows[0]);
+  const esc = (v) => {
+    if (v === null || v === undefined) return "";
+    const s = String(v);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const lines = [headers.join(",")];
+  rows.forEach(r => lines.push(headers.map(h => esc(r[h])).join(",")));
+  return lines.join("\n");
+}
+
+function downloadCsv(filename, csvText) {
+  const blob = new Blob([csvText], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+async function allTimeRange() {
+  const res = await run(`SELECT MIN(entry_date) as min_d, MAX(entry_date) as max_d FROM interactions`);
+  const row = res.rows[0];
+  return { from: row.min_d || todayStr(), to: row.max_d || todayStr() };
+}
+
+function currentAcademicYear() {
+  const today = todayStr();
+  for (const ay of academicYears()) {
+    const r = academicYearRange(ay);
+    if (today >= r.from && today <= r.to) return ay;
+  }
+  return academicYears()[0];
+}
+
+function quickRanges() {
+  const today = new Date();
+  const todayS = todayStr();
+  const monday = new Date(today);
+  const day = today.getDay();
+  monday.setDate(today.getDate() - (day === 0 ? 6 : day - 1));
+  const firstOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+
+  const ranges = [
+    { key: "today", label: "Today", from: todayS, to: todayS },
+    { key: "week", label: "This Week", from: monday.toISOString().slice(0, 10), to: todayS },
+    { key: "month", label: "This Month", from: firstOfMonth.toISOString().slice(0, 10), to: todayS },
+  ];
+  TERMS.forEach(t => ranges.push({ key: t.key, label: t.label, from: t.from, to: t.to }));
+  const ay = currentAcademicYear();
+  const ayRange = academicYearRange(ay);
+  ranges.push({ key: "ay", label: `AY ${ay}`, from: ayRange.from, to: ayRange.to });
+  ranges.push({ key: "alltime", label: "All Time", from: null, to: null });
+  return ranges;
+}
+
 function renderDashboard(body) {
   const from = new Date(); from.setDate(from.getDate() - 13);
   body.innerHTML = `
     <div class="card">
       <h2>Dashboard</h2>
-      <p class="card-sub">Aggregated activity across every stat type.</p>
+      <p class="card-sub">Aggregated activity across every stat type — by day, by term, or by academic year.</p>
+      <label>Quick range</label>
+      <div class="chip-picker" id="dQuickRanges">
+        ${quickRanges().map(r => `<button type="button" class="chip-option" data-range-key="${r.key}">${r.label}</button>`).join("")}
+      </div>
       <div class="field-row">
         <div><label for="dFrom">From</label><input id="dFrom" type="date" value="${from.toISOString().slice(0,10)}" /></div>
         <div><label for="dTo">To</label><input id="dTo" type="date" value="${todayStr()}" /></div>
@@ -1328,18 +1519,69 @@ function renderDashboard(body) {
           <select id="dCampus"><option value="">All campuses</option>${CAMPUSES.map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select>
         </div>
       </div>
-      <button class="btn-stamp" id="dRun">Update dashboard</button>
+      <div class="field-row">
+        <button class="btn-stamp" id="dRun">Update dashboard</button>
+        <button class="btn-ghost" id="dExport">Export CSV</button>
+      </div>
     </div>
+
     <div class="card">
-      <h2>Totals by category</h2>
+      <h2>Overview</h2>
       <div id="dTotals" class="summary-strip"></div>
+      <div id="dCampusCompare" class="summary-strip" style="margin-top:8px"></div>
     </div>
+
     <div class="card">
-      <h2>Daily activity</h2>
+      <h2>Activity over time</h2>
+      <p class="card-sub" id="dTrendGranularity"></p>
       <div class="chart-wrap"><canvas id="dChart"></canvas></div>
     </div>
+
+    <div class="card">
+      <h2>By term</h2>
+      <p class="card-sub">Gaps between defined semesters are grouped as "Intersession."</p>
+      <div class="chart-wrap"><canvas id="dTermChart"></canvas></div>
+    </div>
+
+    <div class="card">
+      <h2>Patron counts by section</h2>
+      <div class="chart-wrap"><canvas id="dSectionChart"></canvas></div>
+    </div>
+
+    <div class="card">
+      <h2>Reference interactions</h2>
+      <div class="field-row">
+        <div>
+          <p class="card-sub" style="margin-bottom:6px">By type</p>
+          <div id="dRefTypes" class="summary-strip"></div>
+        </div>
+        <div>
+          <p class="card-sub" style="margin-bottom:6px">Top subject areas</p>
+          <div id="dRefSubjects" class="summary-strip"></div>
+        </div>
+      </div>
+      <p class="card-sub" style="margin-top:14px">READ Scale distribution</p>
+      <div class="chart-wrap"><canvas id="dReadScaleChart"></canvas></div>
+    </div>
   `;
-  let chartInstance = null;
+
+  let chartInstance = null, termChartInstance = null, sectionChartInstance = null, readScaleChartInstance = null;
+
+  $("#dQuickRanges").querySelectorAll(".chip-option").forEach(chip => {
+    chip.onclick = async () => {
+      $("#dQuickRanges").querySelectorAll(".chip-option").forEach(c => c.classList.toggle("selected", c === chip));
+      const r = quickRanges().find(x => x.key === chip.dataset.rangeKey);
+      if (r.key === "alltime") {
+        const range = await allTimeRange();
+        $("#dFrom").value = range.from;
+        $("#dTo").value = range.to;
+      } else {
+        $("#dFrom").value = r.from;
+        $("#dTo").value = r.to;
+      }
+      run_();
+    };
+  });
 
   async function run_() {
     const filters = {
@@ -1348,25 +1590,107 @@ function renderDashboard(body) {
     };
     const rows = await dashboardRows(filters);
 
+    // Totals by category
     const catTotals = {};
-    const dayTotals = {};
-    rows.forEach(r => {
-      catTotals[r.category] = (catTotals[r.category] || 0) + r.count;
-      dayTotals[r.entry_date] = (dayTotals[r.entry_date] || 0) + r.count;
-    });
-
+    rows.forEach(r => { catTotals[r.category] = (catTotals[r.category] || 0) + r.count; });
     $("#dTotals").innerHTML = Object.entries(catTotals).length
       ? Object.entries(catTotals).sort((a, b) => b[1] - a[1]).map(([k, v]) =>
           `<div class="summary-chip">${ALL_CATEGORIES.find(c => c[0] === k)?.[1] || k} <b>${v}</b></div>`).join("")
       : `<div class="empty-state">No data in this range.</div>`;
 
-    const days = Object.keys(dayTotals).sort();
+    // Campus comparison — only meaningful when not already filtered to one campus
+    if (!filters.campus) {
+      const campRows = await campusTotals(filters.from, filters.to, filters.category);
+      $("#dCampusCompare").innerHTML = campRows.length
+        ? campRows.map(r => `<div class="summary-chip">${campusLabel(r.campus)} <b>${r.total}</b></div>`).join("")
+        : "";
+    } else {
+      $("#dCampusCompare").innerHTML = "";
+    }
+
+    // Trend chart (auto granularity)
+    const granularity = granularityForRange(filters.from, filters.to);
+    $("#dTrendGranularity").textContent =
+      granularity === "day" ? "Showing daily totals." :
+      granularity === "week" ? "Range spans over a month — showing weekly totals." :
+      "Range spans over half a year — showing monthly totals.";
+    const bucketTotals = {};
+    rows.forEach(r => { const k = bucketKeyForDate(r.entry_date, granularity); bucketTotals[k] = (bucketTotals[k] || 0) + r.count; });
+    const bucketKeys = Object.keys(bucketTotals).sort();
     if (chartInstance) chartInstance.destroy();
     chartInstance = new window.Chart($("#dChart"), {
       type: "bar",
       data: {
-        labels: days,
-        datasets: [{ label: "Interactions", data: days.map(d => dayTotals[d]), backgroundColor: "#1f3a2e" }],
+        labels: bucketKeys.map(k => bucketLabel(k, granularity)),
+        datasets: [{ label: "Interactions", data: bucketKeys.map(k => bucketTotals[k]), backgroundColor: "#1f3a2e" }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
+        plugins: { legend: { display: false } },
+      },
+    });
+
+    // By term
+    const { labels: termLabels, totals: termTotals } = groupByTerm(rows);
+    if (termChartInstance) termChartInstance.destroy();
+    termChartInstance = new window.Chart($("#dTermChart"), {
+      type: "bar",
+      data: {
+        labels: termLabels,
+        datasets: [{ label: "Interactions", data: termLabels.map(l => termTotals[l]), backgroundColor: "#a9822f" }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
+        plugins: { legend: { display: false } },
+      },
+    });
+
+    // Patron counts by section (its own query, ignores the Category filter)
+    const sectionRows = await patronSectionTotals(filters.from, filters.to, filters.campus);
+    const sectionLabel = (k) => LIBRARY_SECTIONS.find(s => s[0] === k)?.[1] || k;
+    if (sectionChartInstance) sectionChartInstance.destroy();
+    sectionChartInstance = new window.Chart($("#dSectionChart"), {
+      type: "bar",
+      data: {
+        labels: sectionRows.map(r => sectionLabel(r.subcategory)),
+        datasets: [{ label: "Patrons", data: sectionRows.map(r => r.total), backgroundColor: "#3e6350" }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        indexAxis: "y",
+        scales: { x: { beginAtZero: true, ticks: { precision: 0 } } },
+        plugins: { legend: { display: false } },
+      },
+    });
+
+    // Reference interactions breakdown (its own query, ignores the Category filter)
+    const refRows = await referenceBreakdown(filters.from, filters.to, filters.campus);
+    const typeTotals = {};
+    const readScaleTotals = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 };
+    const subjectTotals = {};
+    refRows.forEach(r => {
+      typeTotals[r.subcategory] = (typeTotals[r.subcategory] || 0) + r.count;
+      if (r.read_scale) readScaleTotals[r.read_scale] = (readScaleTotals[r.read_scale] || 0) + r.count;
+      const subj = (r.subject_area || "").trim();
+      if (subj) subjectTotals[subj] = (subjectTotals[subj] || 0) + r.count;
+    });
+    const typeLabel = (k) => REFERENCE_TYPES.find(t => t[0] === k)?.[1] || k;
+    $("#dRefTypes").innerHTML = Object.entries(typeTotals).length
+      ? Object.entries(typeTotals).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="summary-chip">${typeLabel(k)} <b>${v}</b></div>`).join("")
+      : `<div class="empty-state">No reference interactions in this range.</div>`;
+    const topSubjects = Object.entries(subjectTotals).sort((a, b) => b[1] - a[1]).slice(0, 8);
+    $("#dRefSubjects").innerHTML = topSubjects.length
+      ? topSubjects.map(([k, v]) => `<div class="summary-chip">${escapeHtml(k)} <b>${v}</b></div>`).join("")
+      : `<div class="empty-state">No subject areas logged in this range.</div>`;
+
+    if (readScaleChartInstance) readScaleChartInstance.destroy();
+    readScaleChartInstance = new window.Chart($("#dReadScaleChart"), {
+      type: "bar",
+      data: {
+        labels: READ_SCALE.map(([n]) => `Level ${n}`),
+        datasets: [{ label: "Interactions", data: READ_SCALE.map(([n]) => readScaleTotals[n] || 0), backgroundColor: "#8b3a2b" }],
       },
       options: {
         responsive: true, maintainAspectRatio: false,
@@ -1375,6 +1699,17 @@ function renderDashboard(body) {
       },
     });
   }
+
+  $("#dExport").onclick = async () => {
+    const filters = {
+      from: $("#dFrom").value, to: $("#dTo").value,
+      category: $("#dCategory").value, campus: $("#dCampus").value,
+    };
+    const rows = await exportRows(filters);
+    if (!rows.length) { toast("Nothing to export in this range", true); return; }
+    downloadCsv(`library-stats_${filters.from}_to_${filters.to}.csv`, rowsToCsv(rows));
+    toast(`Exported ${rows.length} rows ✓`);
+  };
 
   $("#dRun").onclick = run_;
   run_();
