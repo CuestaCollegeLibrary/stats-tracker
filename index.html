@@ -502,11 +502,9 @@ const CONFIG = {
 
   TURSO_AUTH_TOKEN: "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODM2MzQ5NjYsImlkIjoiMDE5ZjQ4ZDUtYTgwMS03NmM0LWE3YjEtZDEzNjEyMGY2YjRlIiwia2lkIjoiMktaRFFnQUt0ZEo5MXZvRURuZER6N2laTktYUDNUUnRfYXhKY0EzcEdZMCIsInJpZCI6ImZhNjcyNTIxLTczYjctNDlkNC1iMjNiLTQzNTAwZTQxYjc4OSJ9.oDsTaBh5tN3hQAUxZeBMd2FT58wAGhO6RFbJSnppYKQJyMiAn40F_krZNiA4AFxvRb5a7D40QA09WIIZirQzCw",
 
-  // One shared PIN list for everyone — no more separate roles/profiles.
-  // Anyone entering any PIN on this list gets in. slocirc1/ncccirc1 are
-  // kept as-is so they still auto-set the campus toggle at login (see
-  // STUDENT_PIN_CAMPUS below); add or remove PINs freely.
-  PINS: ["slocirc1", "ncccirc1", "librarians", "Cougar007@"],
+  // One shared password for everyone — no per-role PINs and no per-person
+  // login. Change this any time.
+  PASSWORD: "Cougar007@",
 };
 
 import { createClient } from "https://esm.sh/@libsql/client@0.14.0/web";
@@ -534,14 +532,14 @@ async function insertInteraction(row) {
   );
 }
 
-async function todaysEntries(role, staffName) {
+async function todaysEntries() {
   const today = todayStr();
   const res = await run(
     `SELECT id, entry_hour, entry_time, category, subcategory, count, notes, campus, created_at
      FROM interactions
-     WHERE entry_date = ? AND role = ? AND (staff_name = ? OR ? = '')
+     WHERE entry_date = ?
      ORDER BY created_at DESC LIMIT 100`,
-    [today, role, staffName || "", staffName || ""]
+    [today]
   );
   return res.rows;
 }
@@ -588,10 +586,6 @@ const CAMPUSES = [
   ["slo", "San Luis Obispo Campus"],
   ["ncc", "North County Campus"],
 ];
-
-// Which PIN implies which campus, so the campus field can
-// default sensibly at login (still editable per entry).
-const STUDENT_PIN_CAMPUS = { slocirc1: "slo", ncccirc1: "ncc" };
 
 const CIRCULATION_ITEMS = [
   ["non_reserve_book", "Non-Reserve Book"],
@@ -671,7 +665,7 @@ function nowHHMM() {
 
 /* ── STATE ────────────────────────────────────────────────────────── */
 const state = {
-  staffName: "",
+  staffName: "",        // only used by the Weekly Log tab's optional "name" field — not collected at login
   view: "login",       // login | student | librarian | reference | weekly | reports | dashboard
   loginError: "",
   campus: "slo",        // the currently-toggled campus — applied to every physical stat entry
@@ -702,14 +696,13 @@ function render() {
       <div class="campus-toggle" id="campusToggle"></div>
       <div class="session-tag">
         <span class="date-stamp">${todayStr()}</span>
-        <span>${escapeHtml(state.staffName)}</span>
         <button id="logoutBtn">Log out</button>
       </div>
     </div>
     <div class="tabs" id="tabs"></div>
     <div id="viewBody"></div>
   `;
-  $("#logoutBtn").onclick = () => { Object.assign(state, { staffName: "", view: "login", loginError: "" }); render(); };
+  $("#logoutBtn").onclick = () => { Object.assign(state, { view: "login", loginError: "" }); render(); };
   renderCampusToggle();
   renderTabs();
   renderViewBody();
@@ -770,40 +763,35 @@ function renderLogin() {
       <div class="card login-card">
         <span class="eyebrow">Cuesta College Library</span>
         <h2>Sign in to log activity</h2>
-        <p class="card-sub">Enter your name and the shared team PIN to get started.</p>
-        <label for="staffName">Your name</label>
-        <input id="staffName" placeholder="e.g. Del B." value="${escapeHtml(state.staffName)}" />
-        <label for="pin">Team PIN</label>
+        <p class="card-sub">Enter the shared team password to get started.</p>
+        <label for="pin">Password</label>
         <div class="pin-field">
           <input id="pin" type="password" placeholder="••••" />
-          <button type="button" class="pin-toggle" id="pinToggle" aria-label="Show PIN">Show</button>
+          <button type="button" class="pin-toggle" id="pinToggle" aria-label="Show password">Show</button>
         </div>
         <button class="btn-stamp" id="loginBtn">Enter</button>
         <div class="error-msg" id="loginError">${state.loginError || ""}</div>
       </div>
     </div>
   `;
-  $("#staffName").oninput = (e) => { state.staffName = e.target.value; };
 
   $("#pinToggle").onclick = () => {
     const pinInput = $("#pin");
     const showing = pinInput.type === "text";
     pinInput.type = showing ? "password" : "text";
     $("#pinToggle").textContent = showing ? "Show" : "Hide";
-    $("#pinToggle").setAttribute("aria-label", showing ? "Show PIN" : "Hide PIN");
+    $("#pinToggle").setAttribute("aria-label", showing ? "Show password" : "Hide password");
   };
 
   const attemptLogin = () => {
     const pin = $("#pin").value.trim();
-    if (!CONFIG.PINS.includes(pin)) { state.loginError = "Incorrect PIN."; return renderLogin(); }
+    if (pin !== CONFIG.PASSWORD) { state.loginError = "Incorrect password."; return renderLogin(); }
     state.loginError = "";
-    state.campus = STUDENT_PIN_CAMPUS[pin] || state.campus;
     state.view = "student";
     render();
   };
 
   $("#loginBtn").onclick = attemptLogin;
-  $("#staffName").addEventListener("keydown", (e) => { if (e.key === "Enter") attemptLogin(); });
   $("#pin").addEventListener("keydown", (e) => { if (e.key === "Enter") attemptLogin(); });
 }
 
@@ -874,7 +862,7 @@ function renderStudentForm(body) {
 
       if (!selected.length) { toast("Select at least one item first", true); btn.disabled = false; return; }
       for (const key of selected) {
-        await insertInteraction({ entry_date, role: GENERIC_ROLE, staff_name: state.staffName, category, subcategory: key, count: 1, notes, campus });
+        await insertInteraction({ entry_date, role: GENERIC_ROLE, category, subcategory: key, count: 1, notes, campus });
       }
       toast(`Logged ${selected.length} item${selected.length > 1 ? "s" : ""} ✓`);
       selectedPills.forEach(p => { p.classList.remove("selected"); });
@@ -890,7 +878,7 @@ function renderStudentForm(body) {
 }
 
 async function loadStudentTable() {
-  const rows = await todaysEntries(GENERIC_ROLE, state.staffName);
+  const rows = (await todaysEntries()).filter(r => r.category === "circulation" || r.category === "supplies");
   const totalsMap = {};
   rows.forEach(r => { totalsMap[r.subcategory] = (totalsMap[r.subcategory] || 0) + r.count; });
   const label = (k) => [...CIRCULATION_ITEMS, ...SUPPLY_ITEMS].find(i => i[0] === k)?.[1] || k;
@@ -974,10 +962,10 @@ function renderLibrarianForm(body) {
         const count = parseInt(el.value, 10) || 0;
         total += count;
         if (count > 0) {
-          await insertInteraction({ entry_date, entry_hour, role: GENERIC_ROLE, staff_name: state.staffName, category: "patron_count", subcategory: el.dataset.section, count, notes, campus });
+          await insertInteraction({ entry_date, entry_hour, role: GENERIC_ROLE, category: "patron_count", subcategory: el.dataset.section, count, notes, campus });
         }
       }
-      await insertInteraction({ entry_date, entry_hour, role: GENERIC_ROLE, staff_name: state.staffName, category: "patron_count", subcategory: "total_patrons", count: total, notes, campus });
+      await insertInteraction({ entry_date, entry_hour, role: GENERIC_ROLE, category: "patron_count", subcategory: "total_patrons", count: total, notes, campus });
 
       toast("Logged hourly counts ✓");
       sectionInputs.forEach(el => { el.value = 0; });
@@ -994,7 +982,7 @@ function renderLibrarianForm(body) {
 }
 
 async function loadLibrarianTable() {
-  const rows = await todaysEntries(GENERIC_ROLE, state.staffName);
+  const rows = await todaysEntries();
   const patronRows = rows.filter(r => r.category === "patron_count");
   const sectionLabel = (k) => k === "total_patrons" ? "Total Patrons" : (LIBRARY_SECTIONS.find(s => s[0] === k)?.[1] || k);
 
@@ -1067,7 +1055,6 @@ function renderReferenceForm(body) {
         entry_hour: parseInt(time.split(":")[0], 10),
         entry_time: time,
         role: GENERIC_ROLE,
-        staff_name: state.staffName,
         category: "reference",
         subcategory: selectedType,
         count: 1,
@@ -1090,7 +1077,7 @@ function renderReferenceForm(body) {
 }
 
 async function loadReferenceTable() {
-  const rows = (await todaysEntries(GENERIC_ROLE, state.staffName)).filter(r => r.category === "reference");
+  const rows = (await todaysEntries()).filter(r => r.category === "reference");
   const typeLabel = (k) => REFERENCE_TYPES.find(t => t[0] === k)?.[1] || k;
 
   const totalsMap = {};
@@ -1136,10 +1123,15 @@ function renderWeeklyLog(body) {
     </div>
     <div class="card">
       <h2>Add an entry</h2>
+      <label for="wlName">Your name</label>
+      <input id="wlName" placeholder="e.g. Del B." value="${escapeHtml(state.staffName)}" />
+      <label for="wlText">Entry</label>
       <textarea id="wlText" rows="3" placeholder="What's worth noting for the week — coverage changes, maintenance issues, handoff notes..."></textarea>
       <button class="btn-stamp" id="wlSubmit">Post entry</button>
     </div>
   `;
+
+  $("#wlName").oninput = (e) => { state.staffName = e.target.value; };
 
   $("#wlSubmit").onclick = async () => {
     const text = $("#wlText").value.trim();
@@ -1147,7 +1139,7 @@ function renderWeeklyLog(body) {
     const btn = $("#wlSubmit");
     btn.disabled = true;
     try {
-      await insertWeeklyLogEntry({ campus: state.campus, role: GENERIC_ROLE, staff_name: state.staffName, entry_text: text });
+      await insertWeeklyLogEntry({ campus: state.campus, role: GENERIC_ROLE, staff_name: state.staffName || null, entry_text: text });
       $("#wlText").value = "";
       toast("Posted ✓");
       loadWeeklyLog(from, to);
@@ -1237,8 +1229,8 @@ function renderReportsImport(body) {
       const isPhysical = PHYSICAL_REPORT_TYPES.has(reportType);
       const formCampus = isPhysical ? state.campus : null;
       const batch = await run(
-        `INSERT INTO report_uploads (file_name, report_type, uploaded_by, row_count) VALUES (?, ?, ?, ?)`,
-        [fileName, reportType, state.staffName, rows.length]
+        `INSERT INTO report_uploads (file_name, report_type, row_count) VALUES (?, ?, ?)`,
+        [fileName, reportType, rows.length]
       );
       const batchId = Number(batch.lastInsertRowid);
       for (const r of rows) {
@@ -1246,7 +1238,6 @@ function renderReportsImport(body) {
           entry_date: r.entry_date,
           entry_hour: r.entry_hour,
           role: GENERIC_ROLE,
-          staff_name: state.staffName,
           category: reportType,
           subcategory: r.label || null,
           count: r.count,
