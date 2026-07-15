@@ -554,13 +554,13 @@ async function run(sql, args = []) {
 async function insertInteraction(row) {
   return run(
     `INSERT INTO interactions
-      (entry_date, entry_hour, entry_time, role, staff_name, category, subcategory, count, notes, source, report_batch_id, campus, read_scale, subject_area)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (entry_date, entry_hour, entry_time, role, staff_name, category, subcategory, count, notes, source, report_batch_id, campus, read_scale, subject_area, contact_method)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       row.entry_date, row.entry_hour ?? null, row.entry_time ?? null, row.role, row.staff_name ?? null,
       row.category, row.subcategory ?? null, row.count, row.notes ?? null,
       row.source ?? "manual", row.report_batch_id ?? null, row.campus ?? null, row.read_scale ?? null,
-      row.subject_area ?? null,
+      row.subject_area ?? null, row.contact_method ?? null,
     ]
   );
 }
@@ -568,7 +568,7 @@ async function insertInteraction(row) {
 async function todaysEntries() {
   const today = todayStr();
   const res = await run(
-    `SELECT id, entry_hour, entry_time, category, subcategory, count, notes, campus, read_scale, subject_area, created_at
+    `SELECT id, entry_hour, entry_time, category, subcategory, count, notes, campus, read_scale, subject_area, contact_method, created_at
      FROM interactions
      WHERE entry_date = ?
      ORDER BY created_at DESC LIMIT 100`,
@@ -610,7 +610,7 @@ async function referenceBreakdown(from, to, campus) {
   const args = [from, to];
   if (campus) { clauses.push("campus = ?"); args.push(campus); }
   const res = await run(
-    `SELECT subcategory, read_scale, subject_area, count FROM interactions WHERE ${clauses.join(" AND ")}`,
+    `SELECT subcategory, read_scale, subject_area, contact_method, count FROM interactions WHERE ${clauses.join(" AND ")}`,
     args
   );
   return res.rows;
@@ -635,7 +635,7 @@ async function exportRows(filters) {
   if (filters.category) { clauses.push("category = ?"); args.push(filters.category); }
   if (filters.campus) { clauses.push("campus = ?"); args.push(filters.campus); }
   const res = await run(
-    `SELECT entry_date, entry_hour, entry_time, category, subcategory, count, campus, read_scale, subject_area, notes, source
+    `SELECT entry_date, entry_hour, entry_time, category, subcategory, count, campus, read_scale, subject_area, contact_method, notes, source
      FROM interactions WHERE ${clauses.join(" AND ")}
      ORDER BY entry_date ASC, entry_hour ASC`,
     args
@@ -714,6 +714,16 @@ const SUPPLY_ITEMS = [
   ["scantron", "Scantron"], ["bluebook", "Blue Book"], ["notecards", "Notecards"], ["pencil", "Pencil"],
 ];
 
+// Quick, low-level interactions at the circulation desk — brief enough
+// that they don't warrant a full Reference Interaction / READ Scale entry,
+// but still worth counting.
+const CIRC_INTERACTION_ITEMS = [
+  ["directions", "Directions / Wayfinding"],
+  ["located_item", "Located an Item for a Patron"],
+  ["book_request", "Took a Book / Hold Request"],
+  ["other_circ_interaction", "Other"],
+];
+
 // Sections tracked as part of the hourly patron count. Section usage and
 // overall patron count are now the same form: fill in each section, and
 // the total is the sum.
@@ -733,6 +743,13 @@ const REFERENCE_TYPES = [
   ["research_assistance", "Research Assistance"],
   ["citation_assistance", "Citation Assistance"],
   ["other_reference", "Other"],
+];
+
+const CONTACT_METHODS = [
+  ["in_person", "In Person"],
+  ["email", "Email"],
+  ["phone", "Phone"],
+  ["chat", "Library Chat"],
 ];
 
 // READ Scale (Reference Effort Assessment Data) — rates the depth of
@@ -764,7 +781,7 @@ const REPORT_TYPES = [
 const PHYSICAL_REPORT_TYPES = new Set(["circulation_report", "door_count"]);
 
 const ALL_CATEGORIES = [
-  ["supplies", "Supplies"], ["patron_count", "Patron Count"],
+  ["supplies", "Supplies"], ["circ_interaction", "Quick Circulation Interaction"], ["patron_count", "Patron Count"],
   ["reference", "Reference Interaction"],
   ["circulation_report", "Physical Circulation Report (import)"], ["door_count", "Door Count (import)"],
   ["digital_interactions", "Digital Interactions (import)"], ["libguides_stats", "LibGuides Stats (import)"],
@@ -851,7 +868,7 @@ function renderCampusToggle() {
 // One shared set of tabs — no more role-based filtering, everyone sees
 // every stat-tracking feature on the same page.
 const TABS = [
-  ["student", "Supplies"],
+  ["student", "Circulation"],
   ["librarian", "Patron Counts"],
   ["reference", "Reference Interactions"],
   ["weekly", "Weekly Log"],
@@ -918,17 +935,23 @@ function renderLogin() {
   $("#pin").addEventListener("keydown", (e) => { if (e.key === "Enter") attemptLogin(); });
 }
 
-/* ── CIRCULATION & SUPPLIES FORM ──────────────────────────────────── */
+/* ── CIRCULATION FORM (Supplies + Quick Interactions) ─────────────── */
 function renderStudentForm(body) {
   body.innerHTML = `
     <div class="card">
-      <h2>Supplies</h2>
-      <p class="card-sub">Log each supply hand-out as it happens — the date is captured automatically from the entry's timestamp.</p>
+      <h2>Circulation</h2>
+      <p class="card-sub">Log supply hand-outs and quick desk interactions as they happen — the date is captured automatically from the entry's timestamp.</p>
 
-      <label>Items given out (tap all that apply)</label>
+      <label>Supplies given out (tap all that apply)</label>
       <div class="pill-picker" id="scSupplyItems">
         ${SUPPLY_ITEMS.map(([k, l]) => `<button type="button" class="pill-option" data-value="${k}"><span class="pill-check">✓</span>${l}</button>`).join("")}
       </div>
+
+      <label>Quick interactions (tap all that apply)</label>
+      <div class="pill-picker" id="scCircInteractionItems">
+        ${CIRC_INTERACTION_ITEMS.map(([k, l]) => `<button type="button" class="pill-option" data-value="${k}"><span class="pill-check">✓</span>${l}</button>`).join("")}
+      </div>
+      <p class="help-text">For anything more involved — needing to look things up, subject expertise, more than a couple minutes — log it under Reference Interactions instead.</p>
 
       <label for="scNotes">Notes (optional)</label>
       <input id="scNotes" placeholder="e.g. patron type" />
@@ -941,8 +964,10 @@ function renderStudentForm(body) {
     </div>
   `;
 
-  $("#scSupplyItems").querySelectorAll(".pill-option").forEach(pill => {
-    pill.onclick = () => pill.classList.toggle("selected");
+  [$("#scSupplyItems"), $("#scCircInteractionItems")].forEach(wrap => {
+    wrap.querySelectorAll(".pill-option").forEach(pill => {
+      pill.onclick = () => pill.classList.toggle("selected");
+    });
   });
 
   $("#scSubmit").onclick = async () => {
@@ -952,16 +977,22 @@ function renderStudentForm(body) {
       const entry_date = todayStr();
       const campus = state.campus;
       const notes = $("#scNotes").value || null;
-      const wrapEl = $("#scSupplyItems");
-      const selectedPills = [...wrapEl.querySelectorAll(".pill-option.selected")];
-      const selected = selectedPills.map(p => p.dataset.value);
 
-      if (!selected.length) { toast("Select at least one item first", true); btn.disabled = false; return; }
-      for (const key of selected) {
-        await insertInteraction({ entry_date, role: GENERIC_ROLE, category: "supplies", subcategory: key, count: 1, notes, campus });
+      const supplyPills = [...$("#scSupplyItems").querySelectorAll(".pill-option.selected")];
+      const circPills = [...$("#scCircInteractionItems").querySelectorAll(".pill-option.selected")];
+
+      if (!supplyPills.length && !circPills.length) { toast("Select at least one item first", true); btn.disabled = false; return; }
+
+      for (const p of supplyPills) {
+        await insertInteraction({ entry_date, role: GENERIC_ROLE, category: "supplies", subcategory: p.dataset.value, count: 1, notes, campus });
       }
-      toast(`Logged ${selected.length} item${selected.length > 1 ? "s" : ""} ✓`);
-      selectedPills.forEach(p => { p.classList.remove("selected"); });
+      for (const p of circPills) {
+        await insertInteraction({ entry_date, role: GENERIC_ROLE, category: "circ_interaction", subcategory: p.dataset.value, count: 1, notes, campus });
+      }
+
+      const total = supplyPills.length + circPills.length;
+      toast(`Logged ${total} item${total > 1 ? "s" : ""} ✓`);
+      [...supplyPills, ...circPills].forEach(p => { p.classList.remove("selected"); });
       $("#scNotes").value = "";
       loadStudentTable();
     } catch (err) {
@@ -974,10 +1005,10 @@ function renderStudentForm(body) {
 }
 
 async function loadStudentTable() {
-  const rows = (await todaysEntries()).filter(r => r.category === "supplies");
+  const rows = (await todaysEntries()).filter(r => r.category === "supplies" || r.category === "circ_interaction");
   const totalsMap = {};
   rows.forEach(r => { totalsMap[r.subcategory] = (totalsMap[r.subcategory] || 0) + r.count; });
-  const label = (k) => SUPPLY_ITEMS.find(i => i[0] === k)?.[1] || k;
+  const label = (k) => [...SUPPLY_ITEMS, ...CIRC_INTERACTION_ITEMS].find(i => i[0] === k)?.[1] || k;
 
   $("#scSummary").innerHTML = Object.entries(totalsMap).length
     ? Object.entries(totalsMap).map(([k, v]) => `<div class="summary-chip">${label(k)} <b>${v}</b></div>`).join("")
@@ -1120,6 +1151,10 @@ function renderReferenceForm(body) {
       <div class="chip-picker" id="rfType">
         ${REFERENCE_TYPES.map(([k, l]) => `<button type="button" class="chip-option" data-ref-type="${k}">${l}</button>`).join("")}
       </div>
+      <label>Method of contact</label>
+      <div class="chip-picker" id="rfContact">
+        ${CONTACT_METHODS.map(([k, l]) => `<button type="button" class="chip-option" data-contact="${k}">${l}</button>`).join("")}
+      </div>
       <label>READ Scale rating</label>
       <div class="read-scale-picker" id="rfReadScale">
         ${READ_SCALE.map(([n, desc]) => `
@@ -1149,6 +1184,14 @@ function renderReferenceForm(body) {
     };
   });
 
+  let selectedContact = null;
+  $("#rfContact").querySelectorAll(".chip-option").forEach(chip => {
+    chip.onclick = () => {
+      selectedContact = chip.dataset.contact;
+      $("#rfContact").querySelectorAll(".chip-option").forEach(c => c.classList.toggle("selected", c === chip));
+    };
+  });
+
   let selectedReadScale = null;
   $("#rfReadScale").querySelectorAll(".read-scale-option").forEach(opt => {
     opt.onclick = () => {
@@ -1159,6 +1202,7 @@ function renderReferenceForm(body) {
 
   $("#rfSubmit").onclick = async () => {
     if (!selectedType) { toast("Pick a reference type first", true); return; }
+    if (!selectedContact) { toast("Pick a method of contact first", true); return; }
     if (!selectedReadScale) { toast("Pick a READ Scale rating first", true); return; }
     const btn = $("#rfSubmit");
     btn.disabled = true;
@@ -1171,6 +1215,7 @@ function renderReferenceForm(body) {
         role: GENERIC_ROLE,
         category: "reference",
         subcategory: selectedType,
+        contact_method: selectedContact,
         read_scale: selectedReadScale,
         subject_area: $("#rfSubject").value || null,
         count: 1,
@@ -1182,8 +1227,10 @@ function renderReferenceForm(body) {
       $("#rfNotes").value = "";
       $("#rfTime").value = nowHHMM();
       selectedType = null;
+      selectedContact = null;
       selectedReadScale = null;
       $("#rfType").querySelectorAll(".chip-option").forEach(c => c.classList.remove("selected"));
+      $("#rfContact").querySelectorAll(".chip-option").forEach(c => c.classList.remove("selected"));
       $("#rfReadScale").querySelectorAll(".read-scale-option").forEach(o => o.classList.remove("selected"));
       loadReferenceTable();
     } catch (err) {
@@ -1198,6 +1245,7 @@ function renderReferenceForm(body) {
 async function loadReferenceTable() {
   const rows = (await todaysEntries()).filter(r => r.category === "reference");
   const typeLabel = (k) => REFERENCE_TYPES.find(t => t[0] === k)?.[1] || k;
+  const contactLabel = (k) => CONTACT_METHODS.find(c => c[0] === k)?.[1] || k;
   const readScaleDesc = (n) => READ_SCALE.find(r => r[0] === n)?.[1] || "";
 
   const totalsMap = {};
@@ -1207,12 +1255,13 @@ async function loadReferenceTable() {
     : "";
 
   $("#rfTable").innerHTML = rows.length ? `
-    <table><thead><tr><th>Time</th><th>Campus</th><th>Type</th><th class="num">READ</th><th>Subject</th><th>Notes</th></tr></thead>
+    <table><thead><tr><th>Time</th><th>Campus</th><th>Type</th><th>Contact</th><th class="num">READ</th><th>Subject</th><th>Notes</th></tr></thead>
     <tbody>${rows.map(r => `
       <tr>
         <td>${r.entry_time || (r.entry_hour !== null ? hourOptions()[r.entry_hour][1] : "—")}</td>
         <td>${campusLabel(r.campus)}</td>
         <td>${typeLabel(r.subcategory)}</td>
+        <td>${contactLabel(r.contact_method)}</td>
         <td class="num" title="${escapeHtml(readScaleDesc(r.read_scale))}">${r.read_scale ?? "—"}</td>
         <td>${escapeHtml(r.subject_area || "")}</td>
         <td>${escapeHtml(r.notes || "")}</td>
@@ -1550,10 +1599,14 @@ function renderDashboard(body) {
 
     <div class="card">
       <h2>Reference interactions</h2>
-      <div class="field-row">
+      <div class="field-row three">
         <div>
           <p class="card-sub" style="margin-bottom:6px">By type</p>
           <div id="dRefTypes" class="summary-strip"></div>
+        </div>
+        <div>
+          <p class="card-sub" style="margin-bottom:6px">By method of contact</p>
+          <div id="dRefContact" class="summary-strip"></div>
         </div>
         <div>
           <p class="card-sub" style="margin-bottom:6px">Top subject areas</p>
@@ -1668,17 +1721,23 @@ function renderDashboard(body) {
     // Reference interactions breakdown (its own query, ignores the Category filter)
     const refRows = await referenceBreakdown(filters.from, filters.to, filters.campus);
     const typeTotals = {};
+    const contactTotals = {};
     const readScaleTotals = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 };
     const subjectTotals = {};
     refRows.forEach(r => {
       typeTotals[r.subcategory] = (typeTotals[r.subcategory] || 0) + r.count;
+      if (r.contact_method) contactTotals[r.contact_method] = (contactTotals[r.contact_method] || 0) + r.count;
       if (r.read_scale) readScaleTotals[r.read_scale] = (readScaleTotals[r.read_scale] || 0) + r.count;
       const subj = (r.subject_area || "").trim();
       if (subj) subjectTotals[subj] = (subjectTotals[subj] || 0) + r.count;
     });
     const typeLabel = (k) => REFERENCE_TYPES.find(t => t[0] === k)?.[1] || k;
+    const contactLabel = (k) => CONTACT_METHODS.find(c => c[0] === k)?.[1] || k;
     $("#dRefTypes").innerHTML = Object.entries(typeTotals).length
       ? Object.entries(typeTotals).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="summary-chip">${typeLabel(k)} <b>${v}</b></div>`).join("")
+      : `<div class="empty-state">No reference interactions in this range.</div>`;
+    $("#dRefContact").innerHTML = Object.entries(contactTotals).length
+      ? Object.entries(contactTotals).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="summary-chip">${contactLabel(k)} <b>${v}</b></div>`).join("")
       : `<div class="empty-state">No reference interactions in this range.</div>`;
     const topSubjects = Object.entries(subjectTotals).sort((a, b) => b[1] - a[1]).slice(0, 8);
     $("#dRefSubjects").innerHTML = topSubjects.length
