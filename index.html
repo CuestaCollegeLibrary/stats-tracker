@@ -321,6 +321,30 @@ th {
 }
 td.num, th.num { font-family: var(--font-mono); text-align: right; }
 
+.row-actions { display: flex; gap: 4px; white-space: nowrap; }
+.btn-row-action {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--ink-soft);
+  background: none;
+  border: 1px solid var(--card-line);
+  border-radius: 3px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.btn-row-action:hover { border-color: var(--brass); color: var(--brass); }
+.btn-row-action.danger:hover { border-color: var(--stamp-red); color: var(--stamp-red); }
+.btn-row-action.primary { border-color: var(--forest); color: var(--forest); }
+
+td input, td select {
+  padding: 4px 6px;
+  font-size: 0.8rem;
+  min-width: 60px;
+}
+tr.editing-row { background: #f7f3e4; }
+
 .empty-state {
   text-align: center;
   padding: 30px 10px;
@@ -577,6 +601,21 @@ async function todaysEntries() {
   return res.rows;
 }
 
+// Generic row editor — `fields` is an object of column:value pairs to update.
+// Callers control the field names (never derived from raw user input), so
+// building the column list this way is safe.
+async function updateInteraction(id, fields) {
+  const cols = Object.keys(fields);
+  const setClause = cols.map(c => `${c} = ?`).join(", ");
+  const args = cols.map(c => fields[c]);
+  args.push(id);
+  return run(`UPDATE interactions SET ${setClause} WHERE id = ?`, args);
+}
+
+async function deleteInteraction(id) {
+  return run(`DELETE FROM interactions WHERE id = ?`, [id]);
+}
+
 async function dashboardRows(filters) {
   const clauses = ["entry_date BETWEEN ? AND ?"];
   const args = [filters.from, filters.to];
@@ -650,6 +689,19 @@ async function insertWeeklyLogEntry({ campus, role, staff_name, entry_text }) {
   );
 }
 
+async function recentUploadBatches(limit = 10) {
+  const res = await run(
+    `SELECT id, file_name, report_type, row_count, uploaded_at FROM report_uploads ORDER BY uploaded_at DESC LIMIT ?`,
+    [limit]
+  );
+  return res.rows;
+}
+
+async function deleteUploadBatch(batchId) {
+  await run(`DELETE FROM interactions WHERE report_batch_id = ?`, [batchId]);
+  await run(`DELETE FROM report_uploads WHERE id = ?`, [batchId]);
+}
+
 async function weeklyLogEntries(campus, from, to) {
   const res = await run(
     `SELECT id, staff_name, role, entry_text, created_at
@@ -659,6 +711,14 @@ async function weeklyLogEntries(campus, from, to) {
     [campus, from, to]
   );
   return res.rows;
+}
+
+async function updateWeeklyLogEntry(id, entry_text) {
+  return run(`UPDATE weekly_log SET entry_text = ? WHERE id = ?`, [entry_text, id]);
+}
+
+async function deleteWeeklyLogEntry(id) {
+  return run(`DELETE FROM weekly_log WHERE id = ?`, [id]);
 }
 
 /* ── LOOKUP DATA ──────────────────────────────────────────────────── */
@@ -938,6 +998,7 @@ function renderLogin() {
 
 /* ── CIRCULATION FORM (Supplies + Quick Interactions) ─────────────── */
 function renderStudentForm(body) {
+  scEditingId = null;
   body.innerHTML = `
     <div class="card">
       <h2>Circulation</h2>
@@ -998,12 +1059,14 @@ function renderStudentForm(body) {
       loadStudentTable();
     } catch (err) {
       console.error(err);
-      toast("Couldn't save — check connection", true);
+      toast("Couldn't save: " + (err?.message || err), true);
     } finally { btn.disabled = false; }
   };
 
   loadStudentTable();
 }
+
+let scEditingId = null;
 
 async function loadStudentTable() {
   const rows = (await todaysEntries()).filter(r => r.category === "supplies" || r.category === "circ_interaction");
@@ -1016,20 +1079,63 @@ async function loadStudentTable() {
     : "";
 
   $("#scTable").innerHTML = rows.length ? `
-    <table><thead><tr><th>Time</th><th>Campus</th><th>Item</th><th class="num">Count</th><th>Notes</th></tr></thead>
-    <tbody>${rows.map(r => `
+    <table><thead><tr><th>Time</th><th>Campus</th><th>Item</th><th class="num">Count</th><th>Notes</th><th></th></tr></thead>
+    <tbody>${rows.map(r => r.id === scEditingId ? `
+      <tr class="editing-row">
+        <td>${fmtTime(r.created_at)}</td>
+        <td><select id="scEditCampus">${CAMPUSES.map(([k, l]) => `<option value="${k}" ${k === r.campus ? "selected" : ""}>${l}</option>`).join("")}</select></td>
+        <td>${label(r.subcategory)}</td>
+        <td><input id="scEditCount" type="number" min="1" value="${r.count}" /></td>
+        <td><input id="scEditNotes" value="${escapeHtml(r.notes || "")}" /></td>
+        <td class="row-actions">
+          <button class="btn-row-action primary" id="scSaveEdit">Save</button>
+          <button class="btn-row-action" id="scCancelEdit">Cancel</button>
+        </td>
+      </tr>` : `
       <tr>
         <td>${fmtTime(r.created_at)}</td>
         <td>${campusLabel(r.campus)}</td>
         <td>${label(r.subcategory)}</td>
         <td class="num">${r.count}</td>
         <td>${escapeHtml(r.notes || "")}</td>
+        <td class="row-actions">
+          <button class="btn-row-action" data-edit-id="${r.id}">Edit</button>
+          <button class="btn-row-action danger" data-delete-id="${r.id}">Delete</button>
+        </td>
       </tr>`).join("")}</tbody></table>
   ` : `<div class="empty-state">No entries logged yet today.</div>`;
+
+  $("#scTable").querySelectorAll("[data-edit-id]").forEach(btn => {
+    btn.onclick = () => { scEditingId = parseInt(btn.dataset.editId, 10); loadStudentTable(); };
+  });
+  $("#scTable").querySelectorAll("[data-delete-id]").forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm("Delete this entry? This can't be undone.")) return;
+      try { await deleteInteraction(parseInt(btn.dataset.deleteId, 10)); toast("Deleted ✓"); loadStudentTable(); }
+      catch (err) { console.error(err); toast("Couldn't delete: " + (err?.message || err), true); }
+    };
+  });
+  if ($("#scCancelEdit")) $("#scCancelEdit").onclick = () => { scEditingId = null; loadStudentTable(); };
+  if ($("#scSaveEdit")) $("#scSaveEdit").onclick = async () => {
+    try {
+      await updateInteraction(scEditingId, {
+        campus: $("#scEditCampus").value,
+        count: Math.max(1, parseInt($("#scEditCount").value, 10) || 1),
+        notes: $("#scEditNotes").value || null,
+      });
+      toast("Saved ✓");
+      scEditingId = null;
+      loadStudentTable();
+    } catch (err) {
+      console.error(err);
+      toast("Couldn't save: " + (err?.message || err), true);
+    }
+  };
 }
 
 /* ── LIBRARIAN FORM (Hourly Patron Counts by Section) ────────────── */
 function renderLibrarianForm(body) {
+  lcEditingId = null;
   body.innerHTML = `
     <div class="card">
       <h2>Library Patron Counts</h2>
@@ -1101,12 +1207,14 @@ function renderLibrarianForm(body) {
       loadLibrarianTable();
     } catch (err) {
       console.error(err);
-      toast("Couldn't save — check connection", true);
+      toast("Couldn't save: " + (err?.message || err), true);
     } finally { btn.disabled = false; }
   };
 
   loadLibrarianTable();
 }
+
+let lcEditingId = null;
 
 async function loadLibrarianTable() {
   const rows = await todaysEntries();
@@ -1120,20 +1228,64 @@ async function loadLibrarianTable() {
     : "";
 
   $("#lcTable").innerHTML = patronRows.length ? `
-    <table><thead><tr><th>Hour</th><th>Campus</th><th>Section</th><th class="num">Count</th><th>Notes</th></tr></thead>
-    <tbody>${patronRows.map(r => `
+    <p class="help-text">Editing or deleting a section count doesn't automatically adjust its paired "Total Patrons" row — fix that one separately if needed.</p>
+    <table><thead><tr><th>Hour</th><th>Campus</th><th>Section</th><th class="num">Count</th><th>Notes</th><th></th></tr></thead>
+    <tbody>${patronRows.map(r => r.id === lcEditingId ? `
+      <tr class="editing-row">
+        <td>${r.entry_hour !== null ? hourOptions()[r.entry_hour][1] : "—"}</td>
+        <td><select id="lcEditCampus">${CAMPUSES.map(([k, l]) => `<option value="${k}" ${k === r.campus ? "selected" : ""}>${l}</option>`).join("")}</select></td>
+        <td>${sectionLabel(r.subcategory)}</td>
+        <td><input id="lcEditCount" type="number" min="0" value="${r.count}" /></td>
+        <td><input id="lcEditNotes" value="${escapeHtml(r.notes || "")}" /></td>
+        <td class="row-actions">
+          <button class="btn-row-action primary" id="lcSaveEdit">Save</button>
+          <button class="btn-row-action" id="lcCancelEdit">Cancel</button>
+        </td>
+      </tr>` : `
       <tr${r.subcategory === "total_patrons" ? ' style="font-weight:600"' : ""}>
         <td>${r.entry_hour !== null ? hourOptions()[r.entry_hour][1] : "—"}</td>
         <td>${campusLabel(r.campus)}</td>
         <td>${sectionLabel(r.subcategory)}</td>
         <td class="num">${r.count}</td>
         <td>${escapeHtml(r.notes || "")}</td>
+        <td class="row-actions">
+          <button class="btn-row-action" data-edit-id="${r.id}">Edit</button>
+          <button class="btn-row-action danger" data-delete-id="${r.id}">Delete</button>
+        </td>
       </tr>`).join("")}</tbody></table>
   ` : `<div class="empty-state">No entries logged yet today.</div>`;
+
+  $("#lcTable").querySelectorAll("[data-edit-id]").forEach(btn => {
+    btn.onclick = () => { lcEditingId = parseInt(btn.dataset.editId, 10); loadLibrarianTable(); };
+  });
+  $("#lcTable").querySelectorAll("[data-delete-id]").forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm("Delete this entry? This can't be undone.")) return;
+      try { await deleteInteraction(parseInt(btn.dataset.deleteId, 10)); toast("Deleted ✓"); loadLibrarianTable(); }
+      catch (err) { console.error(err); toast("Couldn't delete: " + (err?.message || err), true); }
+    };
+  });
+  if ($("#lcCancelEdit")) $("#lcCancelEdit").onclick = () => { lcEditingId = null; loadLibrarianTable(); };
+  if ($("#lcSaveEdit")) $("#lcSaveEdit").onclick = async () => {
+    try {
+      await updateInteraction(lcEditingId, {
+        campus: $("#lcEditCampus").value,
+        count: Math.max(0, parseInt($("#lcEditCount").value, 10) || 0),
+        notes: $("#lcEditNotes").value || null,
+      });
+      toast("Saved ✓");
+      lcEditingId = null;
+      loadLibrarianTable();
+    } catch (err) {
+      console.error(err);
+      toast("Couldn't save: " + (err?.message || err), true);
+    }
+  };
 }
 
 /* ── REFERENCE INTERACTIONS ───────────────────────────────────────── */
 function renderReferenceForm(body) {
+  rfEditingId = null;
   body.innerHTML = `
     <div class="card">
       <h2>Reference Interactions</h2>
@@ -1236,12 +1388,14 @@ function renderReferenceForm(body) {
       loadReferenceTable();
     } catch (err) {
       console.error(err);
-      toast("Couldn't save — check connection", true);
+      toast("Couldn't save: " + (err?.message || err), true);
     } finally { btn.disabled = false; }
   };
 
   loadReferenceTable();
 }
+
+let rfEditingId = null;
 
 async function loadReferenceTable() {
   const rows = (await todaysEntries()).filter(r => r.category === "reference");
@@ -1256,8 +1410,21 @@ async function loadReferenceTable() {
     : "";
 
   $("#rfTable").innerHTML = rows.length ? `
-    <table><thead><tr><th>Time</th><th>Campus</th><th>Type</th><th>Contact</th><th class="num">READ</th><th>Subject</th><th>Notes</th></tr></thead>
-    <tbody>${rows.map(r => `
+    <table><thead><tr><th>Time</th><th>Campus</th><th>Type</th><th>Contact</th><th class="num">READ</th><th>Subject</th><th>Notes</th><th></th></tr></thead>
+    <tbody>${rows.map(r => r.id === rfEditingId ? `
+      <tr class="editing-row">
+        <td>${r.entry_time || (r.entry_hour !== null ? hourOptions()[r.entry_hour][1] : "—")}</td>
+        <td><select id="rfEditCampus">${CAMPUSES.map(([k, l]) => `<option value="${k}" ${k === r.campus ? "selected" : ""}>${l}</option>`).join("")}</select></td>
+        <td><select id="rfEditType">${REFERENCE_TYPES.map(([k, l]) => `<option value="${k}" ${k === r.subcategory ? "selected" : ""}>${l}</option>`).join("")}</select></td>
+        <td><select id="rfEditContact">${CONTACT_METHODS.map(([k, l]) => `<option value="${k}" ${k === r.contact_method ? "selected" : ""}>${l}</option>`).join("")}</select></td>
+        <td><select id="rfEditReadScale">${READ_SCALE.map(([n]) => `<option value="${n}" ${n === r.read_scale ? "selected" : ""}>${n}</option>`).join("")}</select></td>
+        <td><input id="rfEditSubject" value="${escapeHtml(r.subject_area || "")}" /></td>
+        <td><input id="rfEditNotes" value="${escapeHtml(r.notes || "")}" /></td>
+        <td class="row-actions">
+          <button class="btn-row-action primary" id="rfSaveEdit">Save</button>
+          <button class="btn-row-action" id="rfCancelEdit">Cancel</button>
+        </td>
+      </tr>` : `
       <tr>
         <td>${r.entry_time || (r.entry_hour !== null ? hourOptions()[r.entry_hour][1] : "—")}</td>
         <td>${campusLabel(r.campus)}</td>
@@ -1266,8 +1433,42 @@ async function loadReferenceTable() {
         <td class="num" title="${escapeHtml(readScaleDesc(r.read_scale))}">${r.read_scale ?? "—"}</td>
         <td>${escapeHtml(r.subject_area || "")}</td>
         <td>${escapeHtml(r.notes || "")}</td>
+        <td class="row-actions">
+          <button class="btn-row-action" data-edit-id="${r.id}">Edit</button>
+          <button class="btn-row-action danger" data-delete-id="${r.id}">Delete</button>
+        </td>
       </tr>`).join("")}</tbody></table>
   ` : `<div class="empty-state">No interactions logged yet today.</div>`;
+
+  $("#rfTable").querySelectorAll("[data-edit-id]").forEach(btn => {
+    btn.onclick = () => { rfEditingId = parseInt(btn.dataset.editId, 10); loadReferenceTable(); };
+  });
+  $("#rfTable").querySelectorAll("[data-delete-id]").forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm("Delete this interaction? This can't be undone.")) return;
+      try { await deleteInteraction(parseInt(btn.dataset.deleteId, 10)); toast("Deleted ✓"); loadReferenceTable(); }
+      catch (err) { console.error(err); toast("Couldn't delete: " + (err?.message || err), true); }
+    };
+  });
+  if ($("#rfCancelEdit")) $("#rfCancelEdit").onclick = () => { rfEditingId = null; loadReferenceTable(); };
+  if ($("#rfSaveEdit")) $("#rfSaveEdit").onclick = async () => {
+    try {
+      await updateInteraction(rfEditingId, {
+        campus: $("#rfEditCampus").value,
+        subcategory: $("#rfEditType").value,
+        contact_method: $("#rfEditContact").value,
+        read_scale: parseInt($("#rfEditReadScale").value, 10),
+        subject_area: $("#rfEditSubject").value || null,
+        notes: $("#rfEditNotes").value || null,
+      });
+      toast("Saved ✓");
+      rfEditingId = null;
+      loadReferenceTable();
+    } catch (err) {
+      console.error(err);
+      toast("Couldn't save: " + (err?.message || err), true);
+    }
+  };
 }
 
 /* ── WEEKLY LOG ───────────────────────────────────────────────────── */
@@ -1284,6 +1485,7 @@ function currentWeekRange() {
 }
 
 function renderWeeklyLog(body) {
+  wlEditingId = null;
   const { from, to, mondayDate } = currentWeekRange();
   const weekLabel = mondayDate.toLocaleDateString([], { month: "short", day: "numeric" });
 
@@ -1317,20 +1519,59 @@ function renderWeeklyLog(body) {
       loadWeeklyLog(from, to);
     } catch (err) {
       console.error(err);
-      toast("Couldn't post — check connection", true);
+      toast("Couldn't post: " + (err?.message || err), true);
     } finally { btn.disabled = false; }
   };
 
   loadWeeklyLog(from, to);
 }
 
+let wlEditingId = null;
+
 async function loadWeeklyLog(from, to) {
   const rows = await weeklyLogEntries(state.campus, from, to);
-  $("#wlEntries").innerHTML = rows.length ? rows.map(r => `
+  $("#wlEntries").innerHTML = rows.length ? rows.map(r => r.id === wlEditingId ? `
+    <div class="log-entry editing-row">
+      <div class="log-entry-meta"><b>${escapeHtml(r.staff_name || "Unknown")}</b> · ${fmtDateTime(r.created_at)}</div>
+      <textarea id="wlEditText" rows="3">${escapeHtml(r.entry_text)}</textarea>
+      <div class="row-actions" style="margin-top:6px">
+        <button class="btn-row-action primary" id="wlSaveEdit">Save</button>
+        <button class="btn-row-action" id="wlCancelEdit">Cancel</button>
+      </div>
+    </div>` : `
     <div class="log-entry">
       <div class="log-entry-meta"><b>${escapeHtml(r.staff_name || "Unknown")}</b> · ${fmtDateTime(r.created_at)}</div>
       <div class="log-entry-text">${escapeHtml(r.entry_text)}</div>
+      <div class="row-actions" style="margin-top:6px">
+        <button class="btn-row-action" data-edit-id="${r.id}">Edit</button>
+        <button class="btn-row-action danger" data-delete-id="${r.id}">Delete</button>
+      </div>
     </div>`).join("") : `<div class="empty-state">No entries yet this week.</div>`;
+
+  $("#wlEntries").querySelectorAll("[data-edit-id]").forEach(btn => {
+    btn.onclick = () => { wlEditingId = parseInt(btn.dataset.editId, 10); loadWeeklyLog(from, to); };
+  });
+  $("#wlEntries").querySelectorAll("[data-delete-id]").forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm("Delete this entry? This can't be undone.")) return;
+      try { await deleteWeeklyLogEntry(parseInt(btn.dataset.deleteId, 10)); toast("Deleted ✓"); loadWeeklyLog(from, to); }
+      catch (err) { console.error(err); toast("Couldn't delete: " + (err?.message || err), true); }
+    };
+  });
+  if ($("#wlCancelEdit")) $("#wlCancelEdit").onclick = () => { wlEditingId = null; loadWeeklyLog(from, to); };
+  if ($("#wlSaveEdit")) $("#wlSaveEdit").onclick = async () => {
+    const text = $("#wlEditText").value.trim();
+    if (!text) { toast("Entry can't be empty", true); return; }
+    try {
+      await updateWeeklyLogEntry(wlEditingId, text);
+      toast("Saved ✓");
+      wlEditingId = null;
+      loadWeeklyLog(from, to);
+    } catch (err) {
+      console.error(err);
+      toast("Couldn't save: " + (err?.message || err), true);
+    }
+  };
 }
 
 function renderReportsImport(body) {
@@ -1354,7 +1595,43 @@ function renderReportsImport(body) {
       </div>
       <div id="riPreview"></div>
     </div>
+    <div class="card">
+      <h2>Recent imports</h2>
+      <p class="card-sub">Deleting an import removes every row it added, in one go — nothing is left behind to clean up by hand.</p>
+      <div id="riRecent"></div>
+    </div>
   `;
+
+  loadRecentUploads();
+
+  async function loadRecentUploads() {
+    const batches = await recentUploadBatches();
+    $("#riRecent").innerHTML = batches.length ? `
+      <table><thead><tr><th>Uploaded</th><th>File</th><th>Type</th><th class="num">Rows</th><th></th></tr></thead>
+      <tbody>${batches.map(b => `
+        <tr>
+          <td>${fmtDateTime(b.uploaded_at)}</td>
+          <td>${escapeHtml(b.file_name || "—")}</td>
+          <td>${REPORT_TYPES.find(t => t[0] === b.report_type)?.[1] || b.report_type}</td>
+          <td class="num">${b.row_count}</td>
+          <td class="row-actions"><button class="btn-row-action danger" data-batch-id="${b.id}">Delete import</button></td>
+        </tr>`).join("")}</tbody></table>
+    ` : `<div class="empty-state">No imports yet.</div>`;
+
+    $("#riRecent").querySelectorAll("[data-batch-id]").forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm("Delete this entire import? This removes every row it added and can't be undone.")) return;
+        try {
+          await deleteUploadBatch(parseInt(btn.dataset.batchId, 10));
+          toast("Import deleted ✓");
+          loadRecentUploads();
+        } catch (err) {
+          console.error(err);
+          toast("Couldn't delete: " + (err?.message || err), true);
+        }
+      };
+    });
+  }
 
   const drop = $("#riDrop");
   const fileInput = $("#riFile");
@@ -1423,9 +1700,10 @@ function renderReportsImport(body) {
       $("#riPreview").innerHTML = "";
       fileInput.value = "";
       $("#riDropLabel").textContent = "Click to choose a CSV file, or drag one here";
+      loadRecentUploads();
     } catch (err) {
       console.error(err);
-      toast("Import failed — check connection", true);
+      toast("Import failed: " + (err?.message || err), true);
     } finally { btn.disabled = false; }
   }
 }
