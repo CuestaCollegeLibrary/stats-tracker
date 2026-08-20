@@ -93,18 +93,6 @@ body {
   gap: 10px;
 }
 
-.session-tag button {
-  background: none;
-  border: 1px solid var(--card-line);
-  color: var(--ink-soft);
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  padding: 4px 10px;
-  border-radius: 3px;
-  cursor: pointer;
-}
-.session-tag button:hover { border-color: var(--stamp-red); color: var(--stamp-red); }
-
 /* ── Catalog card ─────────────────────────────────────────────────── */
 .card {
   background: var(--paper-raised);
@@ -248,42 +236,6 @@ input[type="number"] { font-family: var(--font-mono); }
   transform: rotate(-1.2deg);
   letter-spacing: 0.04em;
 }
-
-/* ── Login screen ─────────────────────────────────────────────────── */
-.login-wrap {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 70vh;
-}
-.login-card { width: 100%; max-width: 420px; }
-
-.error-msg {
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
-  color: var(--stamp-red);
-  margin-top: 10px;
-}
-
-.pin-field { position: relative; }
-.pin-field input { padding-right: 60px; }
-.pin-toggle {
-  position: absolute;
-  right: 6px;
-  top: 50%;
-  transform: translateY(-50%);
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--ink-soft);
-  background: var(--paper);
-  border: 1px solid var(--card-line);
-  border-radius: 3px;
-  padding: 5px 9px;
-  cursor: pointer;
-}
-.pin-toggle:hover { border-color: var(--brass); color: var(--brass); }
 
 /* ── Weekly log entries ───────────────────────────────────────────── */
 .log-entry {
@@ -557,10 +509,6 @@ const CONFIG = {
   TURSO_URL: "https://lib-stats-tracker-cuestacollegelibrary.aws-us-west-2.turso.io",
 
   TURSO_AUTH_TOKEN: "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODM2MzQ5NjYsImlkIjoiMDE5ZjQ4ZDUtYTgwMS03NmM0LWE3YjEtZDEzNjEyMGY2YjRlIiwia2lkIjoiMktaRFFnQUt0ZEo5MXZvRURuZER6N2laTktYUDNUUnRfYXhKY0EzcEdZMCIsInJpZCI6ImZhNjcyNTIxLTczYjctNDlkNC1iMjNiLTQzNTAwZTQxYjc4OSJ9.oDsTaBh5tN3hQAUxZeBMd2FT58wAGhO6RFbJSnppYKQJyMiAn40F_krZNiA4AFxvRb5a7D40QA09WIIZirQzCw",
-
-  // One shared password for everyone — no per-role PINs and no per-person
-  // login. Change this any time.
-  PASSWORD: "Cougar007@",
 };
 
 import { createClient } from "https://esm.sh/@libsql/client@0.14.0/web";
@@ -843,6 +791,7 @@ const PHYSICAL_REPORT_TYPES = new Set(["circulation_report", "door_count"]);
 
 const ALL_CATEGORIES = [
   ["supplies", "Supplies"], ["circ_interaction", "Quick Circulation Interaction"], ["patron_count", "Patron Count"],
+  ["study_room_availability", "Study Room Availability"],
   ["reference", "Reference Interaction"],
   ["circulation_report", "Physical Circulation Report (import)"], ["door_count", "Door Count (import)"],
   ["digital_interactions", "Digital Interactions (import)"], ["libguides_stats", "LibGuides Stats (import)"],
@@ -866,10 +815,9 @@ function nowHHMM() {
 
 /* ── STATE ────────────────────────────────────────────────────────── */
 const state = {
-  staffName: "",        // only used by the Weekly Log tab's optional "name" field — not collected at login
-  view: "login",       // login | student | librarian | reference | weekly | reports | dashboard
-  loginError: "",
-  campus: "slo",        // the currently-toggled campus — applied to every physical stat entry
+  staffName: "",        // only used by the Weekly Log tab's optional "name" field
+  view: "student",       // student | librarian | reference | weekly | reports | dashboard
+  campus: "slo",         // the currently-toggled campus — applied to every physical stat entry
 };
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -887,7 +835,6 @@ function toast(msg, isError = false) {
 
 /* ── RENDER ROOT ──────────────────────────────────────────────────── */
 function render() {
-  if (state.view === "login") return renderLogin();
   app.innerHTML = `
     <div class="masthead">
       <div>
@@ -897,13 +844,11 @@ function render() {
       <div class="campus-toggle" id="campusToggle"></div>
       <div class="session-tag">
         <span class="date-stamp">${todayStr()}</span>
-        <button id="logoutBtn">Log out</button>
       </div>
     </div>
     <div class="tabs" id="tabs"></div>
     <div id="viewBody"></div>
   `;
-  $("#logoutBtn").onclick = () => { Object.assign(state, { view: "login", loginError: "" }); render(); };
   renderCampusToggle();
   renderTabs();
   renderViewBody();
@@ -955,45 +900,6 @@ function renderViewBody() {
   if (state.view === "weekly") return renderWeeklyLog(body);
   if (state.view === "reports") return renderReportsImport(body);
   if (state.view === "dashboard") return renderDashboard(body);
-}
-
-/* ── LOGIN ────────────────────────────────────────────────────────── */
-function renderLogin() {
-  app.innerHTML = `
-    <div class="login-wrap">
-      <div class="card login-card">
-        <span class="eyebrow">Cuesta College Library</span>
-        <h2>Sign in to log activity</h2>
-        <p class="card-sub">Enter the shared team password to get started.</p>
-        <label for="pin">Password</label>
-        <div class="pin-field">
-          <input id="pin" type="password" placeholder="••••" />
-          <button type="button" class="pin-toggle" id="pinToggle" aria-label="Show password">Show</button>
-        </div>
-        <button class="btn-stamp" id="loginBtn">Enter</button>
-        <div class="error-msg" id="loginError">${state.loginError || ""}</div>
-      </div>
-    </div>
-  `;
-
-  $("#pinToggle").onclick = () => {
-    const pinInput = $("#pin");
-    const showing = pinInput.type === "text";
-    pinInput.type = showing ? "password" : "text";
-    $("#pinToggle").textContent = showing ? "Show" : "Hide";
-    $("#pinToggle").setAttribute("aria-label", showing ? "Show password" : "Hide password");
-  };
-
-  const attemptLogin = () => {
-    const pin = $("#pin").value.trim();
-    if (pin !== CONFIG.PASSWORD) { state.loginError = "Incorrect password."; return renderLogin(); }
-    state.loginError = "";
-    state.view = "student";
-    render();
-  };
-
-  $("#loginBtn").onclick = attemptLogin;
-  $("#pin").addEventListener("keydown", (e) => { if (e.key === "Enter") attemptLogin(); });
 }
 
 /* ── CIRCULATION FORM (Supplies + Quick Interactions) ─────────────── */
@@ -1159,6 +1065,11 @@ function renderLibrarianForm(body) {
           </div>`).join("")}
       </div>
       <div class="total-strip">Total Patrons <b id="pcTotal">0</b></div>
+
+      <label for="pcRoomsOpen">Study rooms currently open / empty</label>
+      <input id="pcRoomsOpen" type="number" min="0" placeholder="e.g. 3" />
+      <p class="help-text">This is room availability, not a patron count — it's tracked separately and doesn't factor into Total Patrons above.</p>
+
       <label for="pcNotes">Notes (optional)</label>
       <input id="pcNotes" placeholder="e.g. event, context" />
       <button class="btn-stamp" id="pcSubmit">Log hourly counts</button>
@@ -1200,9 +1111,15 @@ function renderLibrarianForm(body) {
       }
       await insertInteraction({ entry_date, entry_hour, role: GENERIC_ROLE, category: "patron_count", subcategory: "total_patrons", count: total, notes, campus });
 
+      const roomsOpenVal = $("#pcRoomsOpen").value;
+      if (roomsOpenVal !== "") {
+        await insertInteraction({ entry_date, entry_hour, role: GENERIC_ROLE, category: "study_room_availability", subcategory: "empty_rooms", count: Math.max(0, parseInt(roomsOpenVal, 10) || 0), notes, campus });
+      }
+
       toast("Logged hourly counts ✓");
       sectionInputs.forEach(el => { el.value = 0; });
       updateTotal();
+      $("#pcRoomsOpen").value = "";
       $("#pcNotes").value = "";
       loadLibrarianTable();
     } catch (err) {
@@ -1218,11 +1135,11 @@ let lcEditingId = null;
 
 async function loadLibrarianTable() {
   const rows = await todaysEntries();
-  const patronRows = rows.filter(r => r.category === "patron_count");
-  const sectionLabel = (k) => k === "total_patrons" ? "Total Patrons" : (LIBRARY_SECTIONS.find(s => s[0] === k)?.[1] || k);
+  const patronRows = rows.filter(r => r.category === "patron_count" || r.category === "study_room_availability");
+  const sectionLabel = (k) => k === "total_patrons" ? "Total Patrons" : k === "empty_rooms" ? "Study Rooms Open/Empty" : (LIBRARY_SECTIONS.find(s => s[0] === k)?.[1] || k);
 
   const totalsMap = {};
-  patronRows.forEach(r => { if (r.subcategory !== "total_patrons") totalsMap[r.subcategory] = (totalsMap[r.subcategory] || 0) + r.count; });
+  patronRows.forEach(r => { if (r.subcategory !== "total_patrons" && r.category !== "study_room_availability") totalsMap[r.subcategory] = (totalsMap[r.subcategory] || 0) + r.count; });
   $("#lcSummary").innerHTML = Object.entries(totalsMap).length
     ? Object.entries(totalsMap).map(([k, v]) => `<div class="summary-chip">${sectionLabel(k)} <b>${v}</b></div>`).join("")
     : "";
@@ -1242,7 +1159,7 @@ async function loadLibrarianTable() {
           <button class="btn-row-action" id="lcCancelEdit">Cancel</button>
         </td>
       </tr>` : `
-      <tr${r.subcategory === "total_patrons" ? ' style="font-weight:600"' : ""}>
+      <tr${r.subcategory === "total_patrons" ? ' style="font-weight:600"' : r.category === "study_room_availability" ? ' style="font-style:italic"' : ""}>
         <td>${r.entry_hour !== null ? hourOptions()[r.entry_hour][1] : "—"}</td>
         <td>${campusLabel(r.campus)}</td>
         <td>${sectionLabel(r.subcategory)}</td>
