@@ -259,6 +259,12 @@ input[type="number"] { font-family: var(--font-mono); }
 
 /* ── Today's log / tables ─────────────────────────────────────────── */
 table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border-radius: 3px;
+}
+.table-scroll table { min-width: 640px; }
 th, td {
   text-align: left;
   padding: 7px 8px;
@@ -413,6 +419,53 @@ tr.editing-row { background: #f7f3e4; }
 .pill-option.selected { background: var(--forest); border-color: var(--forest); color: var(--paper-raised); }
 .pill-option .pill-check { display: none; font-size: 0.8rem; }
 .pill-option.selected .pill-check { display: inline; }
+
+/* ── Quantity stepper list (supplies given out) ────────────────────── */
+.stepper-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.stepper-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid var(--card-line);
+  border-radius: 4px;
+  padding: 8px 10px 8px 14px;
+  background: #fff;
+}
+.stepper-row.active { border-color: var(--forest); background: #f0f5f1; }
+.stepper-label { font-size: 0.88rem; color: var(--ink); }
+.stepper-control { display: flex; align-items: center; gap: 12px; }
+.stepper-btn {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 50%;
+  border: 1px solid var(--card-line);
+  background: var(--paper);
+  color: var(--forest);
+  font-size: 1.1rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.stepper-btn:hover { border-color: var(--forest); background: #f0f5f1; }
+.stepper-btn:active { transform: scale(0.92); }
+.stepper-value {
+  font-family: var(--font-mono);
+  font-size: 1.05rem;
+  font-weight: 600;
+  min-width: 22px;
+  text-align: center;
+  color: var(--ink);
+}
 
 /* ── Section count grid (patron counts) ──────────────────────────── */
 .section-grid {
@@ -740,7 +793,7 @@ const LIBRARY_SECTIONS = [
   ["computers_printing", "Computers/Printing"],
   ["study_rooms", "Study Rooms"],
   ["quiet_study", "Quiet Study"],
-  ["open_lab", "Open Lab"],
+  ["general_study_area", "General Study Area"],
   ["zine_makerspace", "Zine/Makerspace"],
   ["childrens_area", "Children's Area"],
   ["events", "Events"],
@@ -910,9 +963,17 @@ function renderStudentForm(body) {
       <h2>Circulation</h2>
       <p class="card-sub">Log supply hand-outs and quick desk interactions as they happen — the date is captured automatically from the entry's timestamp.</p>
 
-      <label>Supplies given out (tap all that apply)</label>
-      <div class="pill-picker" id="scSupplyItems">
-        ${SUPPLY_ITEMS.map(([k, l]) => `<button type="button" class="pill-option" data-value="${k}"><span class="pill-check">✓</span>${l}</button>`).join("")}
+      <label>Supplies given out</label>
+      <div class="stepper-list" id="scSupplyItems">
+        ${SUPPLY_ITEMS.map(([k, l]) => `
+          <div class="stepper-row" data-item="${k}">
+            <span class="stepper-label">${l}</span>
+            <div class="stepper-control">
+              <button type="button" class="stepper-btn" data-action="dec" data-item="${k}" aria-label="Decrease ${l}">−</button>
+              <span class="stepper-value" data-qty="${k}">0</span>
+              <button type="button" class="stepper-btn" data-action="inc" data-item="${k}" aria-label="Increase ${l}">+</button>
+            </div>
+          </div>`).join("")}
       </div>
 
       <label>Quick interactions (tap all that apply)</label>
@@ -932,10 +993,19 @@ function renderStudentForm(body) {
     </div>
   `;
 
-  [$("#scSupplyItems"), $("#scCircInteractionItems")].forEach(wrap => {
-    wrap.querySelectorAll(".pill-option").forEach(pill => {
-      pill.onclick = () => pill.classList.toggle("selected");
-    });
+  $("#scSupplyItems").querySelectorAll(".stepper-btn").forEach(btn => {
+    btn.onclick = () => {
+      const item = btn.dataset.item;
+      const valEl = $(`[data-qty="${item}"]`);
+      let val = parseInt(valEl.textContent, 10) || 0;
+      val = btn.dataset.action === "inc" ? val + 1 : Math.max(0, val - 1);
+      valEl.textContent = val;
+      valEl.closest(".stepper-row").classList.toggle("active", val > 0);
+    };
+  });
+
+  $("#scCircInteractionItems").querySelectorAll(".pill-option").forEach(pill => {
+    pill.onclick = () => pill.classList.toggle("selected");
   });
 
   $("#scSubmit").onclick = async () => {
@@ -946,21 +1016,24 @@ function renderStudentForm(body) {
       const campus = state.campus;
       const notes = $("#scNotes").value || null;
 
-      const supplyPills = [...$("#scSupplyItems").querySelectorAll(".pill-option.selected")];
+      const supplyQtys = SUPPLY_ITEMS
+        .map(([k]) => ({ key: k, qty: parseInt($(`[data-qty="${k}"]`).textContent, 10) || 0 }))
+        .filter(i => i.qty > 0);
       const circPills = [...$("#scCircInteractionItems").querySelectorAll(".pill-option.selected")];
 
-      if (!supplyPills.length && !circPills.length) { toast("Select at least one item first", true); btn.disabled = false; return; }
+      if (!supplyQtys.length && !circPills.length) { toast("Log at least one item first", true); btn.disabled = false; return; }
 
-      for (const p of supplyPills) {
-        await insertInteraction({ entry_date, role: GENERIC_ROLE, category: "supplies", subcategory: p.dataset.value, count: 1, notes, campus });
+      for (const item of supplyQtys) {
+        await insertInteraction({ entry_date, role: GENERIC_ROLE, category: "supplies", subcategory: item.key, count: item.qty, notes, campus });
       }
       for (const p of circPills) {
         await insertInteraction({ entry_date, role: GENERIC_ROLE, category: "circ_interaction", subcategory: p.dataset.value, count: 1, notes, campus });
       }
 
-      const total = supplyPills.length + circPills.length;
+      const total = supplyQtys.length + circPills.length;
       toast(`Logged ${total} item${total > 1 ? "s" : ""} ✓`);
-      [...supplyPills, ...circPills].forEach(p => { p.classList.remove("selected"); });
+      $("#scSupplyItems").querySelectorAll(".stepper-value").forEach(el => { el.textContent = "0"; el.closest(".stepper-row").classList.remove("active"); });
+      circPills.forEach(p => { p.classList.remove("selected"); });
       $("#scNotes").value = "";
       loadStudentTable();
     } catch (err) {
@@ -1131,27 +1204,78 @@ function renderLibrarianForm(body) {
   loadLibrarianTable();
 }
 
-let lcEditingId = null;
+let lcEditingId = null; // holds a group key ('hour__campus') while editing, or a raw row id for Study Room Availability rows
+
+// Collapses the individual per-section rows from one submission (same hour
+// + campus) into a single group, so they can be shown as one line instead
+// of one row per section.
+function groupPatronRows(rows) {
+  const groups = {};
+  rows.forEach(r => {
+    const key = `${r.entry_hour}__${r.campus}`;
+    if (!groups[key]) groups[key] = { key, entry_hour: r.entry_hour, campus: r.campus, sections: {}, total: null, notes: null, ids: [] };
+    const g = groups[key];
+    g.ids.push(r.id);
+    if (g.notes === null && r.notes) g.notes = r.notes;
+    if (r.subcategory === "total_patrons") g.total = r;
+    else g.sections[r.subcategory] = r;
+  });
+  return Object.values(groups).sort((a, b) => (a.entry_hour ?? 0) - (b.entry_hour ?? 0));
+}
 
 async function loadLibrarianTable() {
   const rows = await todaysEntries();
-  const patronRows = rows.filter(r => r.category === "patron_count" || r.category === "study_room_availability");
-  const sectionLabel = (k) => k === "total_patrons" ? "Total Patrons" : k === "empty_rooms" ? "Study Rooms Open/Empty" : (LIBRARY_SECTIONS.find(s => s[0] === k)?.[1] || k);
+  const patronCountRows = rows.filter(r => r.category === "patron_count");
+  const roomRows = rows.filter(r => r.category === "study_room_availability");
+  const sectionLabel = (k) => LIBRARY_SECTIONS.find(s => s[0] === k)?.[1] || k;
 
   const totalsMap = {};
-  patronRows.forEach(r => { if (r.subcategory !== "total_patrons" && r.category !== "study_room_availability") totalsMap[r.subcategory] = (totalsMap[r.subcategory] || 0) + r.count; });
+  patronCountRows.forEach(r => { if (r.subcategory !== "total_patrons") totalsMap[r.subcategory] = (totalsMap[r.subcategory] || 0) + r.count; });
   $("#lcSummary").innerHTML = Object.entries(totalsMap).length
     ? Object.entries(totalsMap).map(([k, v]) => `<div class="summary-chip">${sectionLabel(k)} <b>${v}</b></div>`).join("")
     : "";
 
-  $("#lcTable").innerHTML = patronRows.length ? `
-    <p class="help-text">Editing or deleting a section count doesn't automatically adjust its paired "Total Patrons" row — fix that one separately if needed.</p>
-    <table><thead><tr><th>Hour</th><th>Campus</th><th>Section</th><th class="num">Count</th><th>Notes</th><th></th></tr></thead>
-    <tbody>${patronRows.map(r => r.id === lcEditingId ? `
+  const groups = groupPatronRows(patronCountRows);
+
+  const patronTable = groups.length ? `
+    <div class="table-scroll">
+      <table><thead><tr>
+        <th>Hour</th><th>Campus</th>
+        ${LIBRARY_SECTIONS.map(([, l]) => `<th class="num">${l}</th>`).join("")}
+        <th class="num">Total</th><th>Notes</th><th></th>
+      </tr></thead>
+      <tbody>${groups.map(g => g.key === lcEditingId ? `
+        <tr class="editing-row">
+          <td>${g.entry_hour !== null ? hourOptions()[g.entry_hour][1] : "—"}</td>
+          <td><select id="lcEditCampus">${CAMPUSES.map(([k, l]) => `<option value="${k}" ${k === g.campus ? "selected" : ""}>${l}</option>`).join("")}</select></td>
+          ${LIBRARY_SECTIONS.map(([k]) => `<td><input type="number" min="0" class="lc-edit-section" data-section="${k}" value="${g.sections[k]?.count ?? 0}" /></td>`).join("")}
+          <td class="num" id="lcEditTotal">${g.total?.count ?? 0}</td>
+          <td><input id="lcEditNotes" value="${escapeHtml(g.notes || "")}" /></td>
+          <td class="row-actions">
+            <button class="btn-row-action primary" id="lcSaveEdit">Save</button>
+            <button class="btn-row-action" id="lcCancelEdit">Cancel</button>
+          </td>
+        </tr>` : `
+        <tr>
+          <td>${g.entry_hour !== null ? hourOptions()[g.entry_hour][1] : "—"}</td>
+          <td>${campusLabel(g.campus)}</td>
+          ${LIBRARY_SECTIONS.map(([k]) => `<td class="num">${g.sections[k]?.count ?? 0}</td>`).join("")}
+          <td class="num" style="font-weight:600">${g.total?.count ?? 0}</td>
+          <td>${escapeHtml(g.notes || "")}</td>
+          <td class="row-actions">
+            <button class="btn-row-action" data-edit-group="${g.key}">Edit</button>
+            <button class="btn-row-action danger" data-delete-group="${g.key}">Delete</button>
+          </td>
+        </tr>`).join("")}</tbody></table>
+    </div>
+  ` : "";
+
+  const roomTable = roomRows.length ? `
+    <table><thead><tr><th>Hour</th><th>Campus</th><th class="num">Rooms Open</th><th>Notes</th><th></th></tr></thead>
+    <tbody>${roomRows.map(r => r.id === lcEditingId ? `
       <tr class="editing-row">
         <td>${r.entry_hour !== null ? hourOptions()[r.entry_hour][1] : "—"}</td>
         <td><select id="lcEditCampus">${CAMPUSES.map(([k, l]) => `<option value="${k}" ${k === r.campus ? "selected" : ""}>${l}</option>`).join("")}</select></td>
-        <td>${sectionLabel(r.subcategory)}</td>
         <td><input id="lcEditCount" type="number" min="0" value="${r.count}" /></td>
         <td><input id="lcEditNotes" value="${escapeHtml(r.notes || "")}" /></td>
         <td class="row-actions">
@@ -1159,10 +1283,9 @@ async function loadLibrarianTable() {
           <button class="btn-row-action" id="lcCancelEdit">Cancel</button>
         </td>
       </tr>` : `
-      <tr${r.subcategory === "total_patrons" ? ' style="font-weight:600"' : r.category === "study_room_availability" ? ' style="font-style:italic"' : ""}>
+      <tr style="font-style:italic">
         <td>${r.entry_hour !== null ? hourOptions()[r.entry_hour][1] : "—"}</td>
         <td>${campusLabel(r.campus)}</td>
-        <td>${sectionLabel(r.subcategory)}</td>
         <td class="num">${r.count}</td>
         <td>${escapeHtml(r.notes || "")}</td>
         <td class="row-actions">
@@ -1170,8 +1293,14 @@ async function loadLibrarianTable() {
           <button class="btn-row-action danger" data-delete-id="${r.id}">Delete</button>
         </td>
       </tr>`).join("")}</tbody></table>
+  ` : "";
+
+  $("#lcTable").innerHTML = (patronTable || roomTable) ? `
+    ${patronTable ? `<h3 style="font-family:var(--font-display);font-size:1rem;margin:0 0 8px">Patron counts</h3>${patronTable}` : ""}
+    ${roomTable ? `<h3 style="font-family:var(--font-display);font-size:1rem;margin:18px 0 8px">Study room availability</h3>${roomTable}` : ""}
   ` : `<div class="empty-state">No entries logged yet today.</div>`;
 
+  // Study Room Availability rows — simple single-row edit/delete, same pattern as other tabs.
   $("#lcTable").querySelectorAll("[data-edit-id]").forEach(btn => {
     btn.onclick = () => { lcEditingId = parseInt(btn.dataset.editId, 10); loadLibrarianTable(); };
   });
@@ -1182,14 +1311,65 @@ async function loadLibrarianTable() {
       catch (err) { console.error(err); toast("Couldn't delete: " + (err?.message || err), true); }
     };
   });
+
+  // Patron count groups — editing/deleting acts on every section row in the group at once.
+  $("#lcTable").querySelectorAll("[data-edit-group]").forEach(btn => {
+    btn.onclick = () => { lcEditingId = btn.dataset.editGroup; loadLibrarianTable(); };
+  });
+  $("#lcTable").querySelectorAll("[data-delete-group]").forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm("Delete this entire hourly entry (all sections and the total)? This can't be undone.")) return;
+      const group = groups.find(g => g.key === btn.dataset.deleteGroup);
+      try {
+        for (const id of group.ids) await deleteInteraction(id);
+        toast("Deleted ✓");
+        loadLibrarianTable();
+      } catch (err) { console.error(err); toast("Couldn't delete: " + (err?.message || err), true); }
+    };
+  });
+
   if ($("#lcCancelEdit")) $("#lcCancelEdit").onclick = () => { lcEditingId = null; loadLibrarianTable(); };
+
+  // Live-updating total while editing a patron count group.
+  const editSectionInputs = [...$("#lcTable").querySelectorAll(".lc-edit-section")];
+  if (editSectionInputs.length) {
+    const updateEditTotal = () => {
+      const total = editSectionInputs.reduce((sum, el) => sum + (parseInt(el.value, 10) || 0), 0);
+      $("#lcEditTotal").textContent = total;
+    };
+    editSectionInputs.forEach(el => { el.oninput = updateEditTotal; });
+  }
+
   if ($("#lcSaveEdit")) $("#lcSaveEdit").onclick = async () => {
     try {
-      await updateInteraction(lcEditingId, {
-        campus: $("#lcEditCampus").value,
-        count: Math.max(0, parseInt($("#lcEditCount").value, 10) || 0),
-        notes: $("#lcEditNotes").value || null,
-      });
+      if (editSectionInputs.length) {
+        // Editing a patron count group.
+        const group = groups.find(g => g.key === lcEditingId);
+        const campus = $("#lcEditCampus").value;
+        const notes = $("#lcEditNotes").value || null;
+        let total = 0;
+        for (const el of editSectionInputs) {
+          const key = el.dataset.section;
+          const count = Math.max(0, parseInt(el.value, 10) || 0);
+          total += count;
+          const existing = group.sections[key];
+          if (existing) {
+            if (count > 0) await updateInteraction(existing.id, { campus, count, notes });
+            else await deleteInteraction(existing.id);
+          } else if (count > 0) {
+            await insertInteraction({ entry_date: todayStr(), entry_hour: group.entry_hour, role: GENERIC_ROLE, category: "patron_count", subcategory: key, count, notes, campus });
+          }
+        }
+        if (group.total) await updateInteraction(group.total.id, { campus, count: total, notes });
+        else await insertInteraction({ entry_date: todayStr(), entry_hour: group.entry_hour, role: GENERIC_ROLE, category: "patron_count", subcategory: "total_patrons", count: total, notes, campus });
+      } else {
+        // Editing a Study Room Availability row.
+        await updateInteraction(lcEditingId, {
+          campus: $("#lcEditCampus").value,
+          count: Math.max(0, parseInt($("#lcEditCount").value, 10) || 0),
+          notes: $("#lcEditNotes").value || null,
+        });
+      }
       toast("Saved ✓");
       lcEditingId = null;
       loadLibrarianTable();
@@ -1327,6 +1507,7 @@ async function loadReferenceTable() {
     : "";
 
   $("#rfTable").innerHTML = rows.length ? `
+    <div class="table-scroll">
     <table><thead><tr><th>Time</th><th>Campus</th><th>Type</th><th>Contact</th><th class="num">READ</th><th>Subject</th><th>Notes</th><th></th></tr></thead>
     <tbody>${rows.map(r => r.id === rfEditingId ? `
       <tr class="editing-row">
@@ -1355,6 +1536,7 @@ async function loadReferenceTable() {
           <button class="btn-row-action danger" data-delete-id="${r.id}">Delete</button>
         </td>
       </tr>`).join("")}</tbody></table>
+    </div>
   ` : `<div class="empty-state">No interactions logged yet today.</div>`;
 
   $("#rfTable").querySelectorAll("[data-edit-id]").forEach(btn => {
@@ -1987,6 +2169,26 @@ function escapeHtml(s) {
 }
 
 render();
+
+/* ── BACKGROUND SYNC ──────────────────────────────────────────────────
+   So people on different devices can see each other's entries without
+   a manual refresh. This ONLY re-fetches and re-renders the read-only
+   "Today's log" / Weekly Log list for whichever tab is currently open —
+   it never touches the entry form itself (the pill selections, notes
+   field, date/hour pickers, etc. live in separate DOM containers that
+   these load*Table() functions never write to), and it skips entirely
+   whenever that tab has a row actively being edited, so it can't clobber
+   in-progress edits either. New-entry forms and edit-mode fields are
+   always safe from this — only the list *below* them ever refreshes. */
+setInterval(() => {
+  if (state.view === "student" && scEditingId === null) loadStudentTable();
+  else if (state.view === "librarian" && lcEditingId === null) loadLibrarianTable();
+  else if (state.view === "reference" && rfEditingId === null) loadReferenceTable();
+  else if (state.view === "weekly" && wlEditingId === null) {
+    const { from, to } = currentWeekRange();
+    loadWeeklyLog(from, to);
+  }
+}, 20000);
 
 </script>
 </body>
