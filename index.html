@@ -799,6 +799,20 @@ const LIBRARY_SECTIONS = [
   ["events", "Events"],
 ];
 
+// North County has a smaller physical footprint, so its Patron Counts form
+// shows only these sections — just the keys, in display order. SLO shows
+// the full LIBRARY_SECTIONS list above. This only affects which fields show
+// up on the entry form; LIBRARY_SECTIONS stays the canonical label lookup
+// everywhere else (Today's log, Dashboard, CSV export), so historical or
+// edited rows using any section always display correctly regardless of
+// which campus they're tagged with.
+const NCC_SECTIONS = ["general_study_area", "study_rooms", "childrens_area", "events"];
+
+function sectionsForCampus(campus) {
+  if (campus === "ncc") return NCC_SECTIONS.map(k => LIBRARY_SECTIONS.find(([sk]) => sk === k));
+  return LIBRARY_SECTIONS;
+}
+
 const REFERENCE_TYPES = [
   ["quick_directional", "Quick / Directional"],
   ["computer_printing", "Computer / Printing"],
@@ -917,8 +931,11 @@ function renderCampusToggle() {
   el.querySelectorAll(".campus-btn").forEach(btn => {
     btn.onclick = () => {
       state.campus = btn.dataset.campus;
-      // Update just the toggle's own markup so any in-progress form entries elsewhere on the page aren't lost.
+      // Update just the toggle's own markup so any in-progress form entries elsewhere on the page aren't lost —
+      // EXCEPT Patron Counts, whose section list depends on campus (NCC shows fewer sections than SLO), so that
+      // one tab specifically needs a fresh render to show the right fields. Every other tab is left untouched.
       renderCampusToggle();
+      if (state.view === "librarian") renderLibrarianForm($("#viewBody"));
       toast(`Campus set to ${campusLabel(state.campus)}`);
     };
   });
@@ -1115,10 +1132,11 @@ async function loadStudentTable() {
 /* ── LIBRARIAN FORM (Hourly Patron Counts by Section) ────────────── */
 function renderLibrarianForm(body) {
   lcEditingId = null;
+  const sections = sectionsForCampus(state.campus);
   body.innerHTML = `
     <div class="card">
       <h2>Library Patron Counts</h2>
-      <p class="card-sub">Enter how many patrons were in each section this hour — the total below adds itself up as you go.</p>
+      <p class="card-sub">Enter how many patrons were in each section this hour — the total below adds itself up as you go.${state.campus === "ncc" ? " Showing North County's sections." : ""}</p>
       <div class="field-row">
         <div>
           <label for="pcDate">Date</label>
@@ -1131,7 +1149,7 @@ function renderLibrarianForm(body) {
       </div>
       <label>Section counts</label>
       <div class="section-grid" id="pcSections">
-        ${LIBRARY_SECTIONS.map(([k, l]) => `
+        ${sections.map(([k, l]) => `
           <div class="section-field">
             <label for="pc_${k}">${l}</label>
             <input id="pc_${k}" type="number" min="0" value="0" data-section="${k}" />
