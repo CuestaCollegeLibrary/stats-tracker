@@ -265,6 +265,42 @@ table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   border-radius: 3px;
 }
 .table-scroll table { min-width: 640px; }
+
+.log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.log-header h2 { margin: 0; }
+.day-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+.day-nav-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px solid var(--card-line);
+  background: var(--paper);
+  color: var(--forest);
+  font-size: 0.95rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.day-nav-btn:hover:not(:disabled) { border-color: var(--forest); background: #f0f5f1; }
+.day-nav-btn:disabled { color: var(--card-line); cursor: not-allowed; }
+.day-nav-label { min-width: 96px; text-align: center; }
+
 th, td {
   text-align: left;
   padding: 7px 8px;
@@ -590,14 +626,13 @@ async function insertInteraction(row) {
   );
 }
 
-async function todaysEntries() {
-  const today = todayStr();
+async function entriesForDate(dateStr) {
   const res = await run(
     `SELECT id, entry_hour, entry_time, category, subcategory, count, notes, campus, read_scale, subject_area, contact_method, created_at
      FROM interactions
      WHERE entry_date = ?
-     ORDER BY created_at DESC LIMIT 100`,
-    [today]
+     ORDER BY created_at DESC LIMIT 200`,
+    [dateStr]
   );
   return res.rows;
 }
@@ -875,6 +910,52 @@ function hourOptions() {
   });
 }
 
+// Both campuses close at 5pm on Fridays and 8pm the rest of the week.
+// "Hour" values represent the START of an hour slot, so a 5pm close means
+// the last valid slot is 4-5pm (hour 16); an 8pm close means 7-8pm (19).
+// No opening time is enforced here — that wasn't specified, and this app
+// doesn't guess at operating hours it hasn't been explicitly given.
+// Edit this if the schedule ever changes.
+function lastOperatingHourForDate(dateStr) {
+  const day = new Date(dateStr + "T00:00:00").getDay(); // 0=Sun ... 5=Fri ... 6=Sat
+  return day === 5 ? 16 : 19;
+}
+
+function fmtLogDate(dateStr) {
+  if (dateStr === todayStr()) return "Today";
+  const d = new Date(dateStr + "T00:00:00");
+  return d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+}
+
+function dayNavHtml() {
+  const isToday = state.viewDate === todayStr();
+  return `
+    <div class="day-nav">
+      <button type="button" class="day-nav-btn" id="dayNavPrev" aria-label="Previous day">←</button>
+      <span class="day-nav-label">${fmtLogDate(state.viewDate)}</span>
+      <button type="button" class="day-nav-btn" id="dayNavNext" aria-label="Next day" ${isToday ? "disabled" : ""}>→</button>
+    </div>
+  `;
+}
+
+function bindDayNav(onChange) {
+  $("#dayNavPrev").onclick = () => {
+    const d = new Date(state.viewDate + "T00:00:00");
+    d.setDate(d.getDate() - 1);
+    state.viewDate = d.toISOString().slice(0, 10);
+    onChange();
+  };
+  const nextBtn = $("#dayNavNext");
+  if (nextBtn) {
+    nextBtn.onclick = () => {
+      const d = new Date(state.viewDate + "T00:00:00");
+      d.setDate(d.getDate() + 1);
+      const next = d.toISOString().slice(0, 10);
+      if (next <= todayStr()) { state.viewDate = next; onChange(); }
+    };
+  }
+}
+
 function nowHHMM() {
   const d = new Date();
   return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
@@ -885,9 +966,11 @@ const state = {
   staffName: "",        // only used by the Weekly Log tab's optional "name" field
   view: "student",       // student | librarian | reference | weekly | reports | dashboard
   campus: "slo",         // the currently-toggled campus — applied to every physical stat entry
+  viewDate: null,        // which day's log is showing on Circulation/Patron Counts/Reference — set to todayStr() below once that's defined
 };
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
+state.viewDate = todayStr();
 const $ = (sel, root = document) => root.querySelector(sel);
 const app = $("#app");
 
@@ -1004,7 +1087,10 @@ function renderStudentForm(body) {
       <button class="btn-stamp" id="scSubmit">Log entry</button>
     </div>
     <div class="card">
-      <h2>Today's log</h2>
+      <div class="log-header">
+        <h2 id="scLogHeading">Today's log</h2>
+        <div id="scDayNav"></div>
+      </div>
       <div id="scSummary" class="summary-strip"></div>
       <div id="scTable"></div>
     </div>
@@ -1065,7 +1151,11 @@ function renderStudentForm(body) {
 let scEditingId = null;
 
 async function loadStudentTable() {
-  const rows = (await todaysEntries()).filter(r => r.category === "supplies" || r.category === "circ_interaction");
+  $("#scLogHeading").textContent = state.viewDate === todayStr() ? "Today's log" : `Log — ${fmtLogDate(state.viewDate)}`;
+  $("#scDayNav").innerHTML = dayNavHtml();
+  bindDayNav(loadStudentTable);
+
+  const rows = (await entriesForDate(state.viewDate)).filter(r => r.category === "supplies" || r.category === "circ_interaction");
   const totalsMap = {};
   rows.forEach(r => { totalsMap[r.subcategory] = (totalsMap[r.subcategory] || 0) + r.count; });
   const label = (k) => [...SUPPLY_ITEMS, ...CIRC_INTERACTION_ITEMS].find(i => i[0] === k)?.[1] || k;
@@ -1099,7 +1189,7 @@ async function loadStudentTable() {
           <button class="btn-row-action danger" data-delete-id="${r.id}">Delete</button>
         </td>
       </tr>`).join("")}</tbody></table>
-  ` : `<div class="empty-state">No entries logged yet today.</div>`;
+  ` : `<div class="empty-state">No entries logged ${state.viewDate === todayStr() ? "yet today" : "that day"}.</div>`;
 
   $("#scTable").querySelectorAll("[data-edit-id]").forEach(btn => {
     btn.onclick = () => { scEditingId = parseInt(btn.dataset.editId, 10); loadStudentTable(); };
@@ -1147,6 +1237,7 @@ function renderLibrarianForm(body) {
           <select id="pcHour"></select>
         </div>
       </div>
+      <p class="help-text">Hours only go up to closing time for the selected date — 5pm on Fridays, 8pm other days.</p>
       <label>Section counts</label>
       <div class="section-grid" id="pcSections">
         ${sections.map(([k, l]) => `
@@ -1166,14 +1257,30 @@ function renderLibrarianForm(body) {
       <button class="btn-stamp" id="pcSubmit">Log hourly counts</button>
     </div>
     <div class="card">
-      <h2>Today's log</h2>
+      <div class="log-header">
+        <h2 id="lcLogHeading">Today's log</h2>
+        <div id="lcDayNav"></div>
+      </div>
       <div id="lcSummary" class="summary-strip"></div>
       <div id="lcTable"></div>
     </div>
   `;
   const hourSel = $("#pcHour");
   const nowHour = new Date().getHours();
-  hourSel.innerHTML = hourOptions().map(([h, l]) => `<option value="${h}" ${h === nowHour ? "selected" : ""}>${l}</option>`).join("");
+
+  const refreshHourOptions = () => {
+    const lastHour = lastOperatingHourForDate($("#pcDate").value || todayStr());
+    const prevValue = hourSel.value;
+    hourSel.innerHTML = hourOptions()
+      .filter(([h]) => h <= lastHour)
+      .map(([h, l]) => `<option value="${h}">${l}</option>`).join("");
+    // Keep the previous selection if it's still valid for the new date; otherwise
+    // fall back to the current hour if that's open, or the last open hour.
+    if (prevValue !== "" && parseInt(prevValue, 10) <= lastHour) hourSel.value = prevValue;
+    else hourSel.value = String(Math.min(nowHour, lastHour));
+  };
+  refreshHourOptions();
+  $("#pcDate").onchange = refreshHourOptions;
 
   const sectionInputs = [...$("#pcSections").querySelectorAll("[data-section]")];
   const updateTotal = () => {
@@ -1242,7 +1349,11 @@ function groupPatronRows(rows) {
 }
 
 async function loadLibrarianTable() {
-  const rows = await todaysEntries();
+  $("#lcLogHeading").textContent = state.viewDate === todayStr() ? "Today's log" : `Log — ${fmtLogDate(state.viewDate)}`;
+  $("#lcDayNav").innerHTML = dayNavHtml();
+  bindDayNav(loadLibrarianTable);
+
+  const rows = await entriesForDate(state.viewDate);
   const patronCountRows = rows.filter(r => r.category === "patron_count");
   const roomRows = rows.filter(r => r.category === "study_room_availability");
   const sectionLabel = (k) => LIBRARY_SECTIONS.find(s => s[0] === k)?.[1] || k;
@@ -1316,7 +1427,7 @@ async function loadLibrarianTable() {
   $("#lcTable").innerHTML = (patronTable || roomTable) ? `
     ${patronTable ? `<h3 style="font-family:var(--font-display);font-size:1rem;margin:0 0 8px">Patron counts</h3>${patronTable}` : ""}
     ${roomTable ? `<h3 style="font-family:var(--font-display);font-size:1rem;margin:18px 0 8px">Study room availability</h3>${roomTable}` : ""}
-  ` : `<div class="empty-state">No entries logged yet today.</div>`;
+  ` : `<div class="empty-state">No entries logged ${state.viewDate === todayStr() ? "yet today" : "that day"}.</div>`;
 
   // Study Room Availability rows — simple single-row edit/delete, same pattern as other tabs.
   $("#lcTable").querySelectorAll("[data-edit-id]").forEach(btn => {
@@ -1375,11 +1486,11 @@ async function loadLibrarianTable() {
             if (count > 0) await updateInteraction(existing.id, { campus, count, notes });
             else await deleteInteraction(existing.id);
           } else if (count > 0) {
-            await insertInteraction({ entry_date: todayStr(), entry_hour: group.entry_hour, role: GENERIC_ROLE, category: "patron_count", subcategory: key, count, notes, campus });
+            await insertInteraction({ entry_date: state.viewDate, entry_hour: group.entry_hour, role: GENERIC_ROLE, category: "patron_count", subcategory: key, count, notes, campus });
           }
         }
         if (group.total) await updateInteraction(group.total.id, { campus, count: total, notes });
-        else await insertInteraction({ entry_date: todayStr(), entry_hour: group.entry_hour, role: GENERIC_ROLE, category: "patron_count", subcategory: "total_patrons", count: total, notes, campus });
+        else await insertInteraction({ entry_date: state.viewDate, entry_hour: group.entry_hour, role: GENERIC_ROLE, category: "patron_count", subcategory: "total_patrons", count: total, notes, campus });
       } else {
         // Editing a Study Room Availability row.
         await updateInteraction(lcEditingId, {
@@ -1438,7 +1549,10 @@ function renderReferenceForm(body) {
       <button class="btn-stamp" id="rfSubmit">Log interaction</button>
     </div>
     <div class="card">
-      <h2>Today's log</h2>
+      <div class="log-header">
+        <h2 id="rfLogHeading">Today's log</h2>
+        <div id="rfDayNav"></div>
+      </div>
       <div id="rfSummary" class="summary-strip"></div>
       <div id="rfTable"></div>
     </div>
@@ -1513,7 +1627,11 @@ function renderReferenceForm(body) {
 let rfEditingId = null;
 
 async function loadReferenceTable() {
-  const rows = (await todaysEntries()).filter(r => r.category === "reference");
+  $("#rfLogHeading").textContent = state.viewDate === todayStr() ? "Today's log" : `Log — ${fmtLogDate(state.viewDate)}`;
+  $("#rfDayNav").innerHTML = dayNavHtml();
+  bindDayNav(loadReferenceTable);
+
+  const rows = (await entriesForDate(state.viewDate)).filter(r => r.category === "reference");
   const typeLabel = (k) => REFERENCE_TYPES.find(t => t[0] === k)?.[1] || k;
   const contactLabel = (k) => CONTACT_METHODS.find(c => c[0] === k)?.[1] || k;
   const readScaleDesc = (n) => READ_SCALE.find(r => r[0] === n)?.[1] || "";
@@ -1555,7 +1673,7 @@ async function loadReferenceTable() {
         </td>
       </tr>`).join("")}</tbody></table>
     </div>
-  ` : `<div class="empty-state">No interactions logged yet today.</div>`;
+  ` : `<div class="empty-state">No interactions logged ${state.viewDate === todayStr() ? "yet today" : "that day"}.</div>`;
 
   $("#rfTable").querySelectorAll("[data-edit-id]").forEach(btn => {
     btn.onclick = () => { rfEditingId = parseInt(btn.dataset.editId, 10); loadReferenceTable(); };
@@ -2197,8 +2315,11 @@ render();
    these load*Table() functions never write to), and it skips entirely
    whenever that tab has a row actively being edited, so it can't clobber
    in-progress edits either. New-entry forms and edit-mode fields are
-   always safe from this — only the list *below* them ever refreshes. */
+   always safe from this — only the list *below* them ever refreshes.
+   It also skips itself whenever a past day is on screen (via the day-nav
+   arrows), since that data is fixed and won't change underneath anyone. */
 setInterval(() => {
+  if (state.viewDate !== todayStr()) return;
   if (state.view === "student" && scEditingId === null) loadStudentTable();
   else if (state.view === "librarian" && lcEditingId === null) loadLibrarianTable();
   else if (state.view === "reference" && rfEditingId === null) loadReferenceTable();
