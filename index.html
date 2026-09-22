@@ -631,7 +631,7 @@ async function entriesForDate(dateStr) {
     `SELECT id, entry_hour, entry_time, category, subcategory, count, notes, campus, read_scale, subject_area, contact_method, created_at
      FROM interactions
      WHERE entry_date = ?
-     ORDER BY created_at DESC LIMIT 200`,
+     ORDER BY created_at DESC`,
     [dateStr]
   );
   return res.rows;
