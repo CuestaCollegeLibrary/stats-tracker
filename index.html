@@ -841,7 +841,7 @@ const LIBRARY_SECTIONS = [
 // everywhere else (Today's log, Dashboard, CSV export), so historical or
 // edited rows using any section always display correctly regardless of
 // which campus they're tagged with.
-const NCC_SECTIONS = ["general_study_area", "study_rooms", "childrens_area", "events"];
+const NCC_SECTIONS = ["computers_printing", "general_study_area", "study_rooms", "childrens_area", "events"];
 
 function sectionsForCampus(campus) {
   if (campus === "ncc") return NCC_SECTIONS.map(k => LIBRARY_SECTIONS.find(([sk]) => sk === k));
@@ -942,7 +942,7 @@ function bindDayNav(onChange) {
   $("#dayNavPrev").onclick = () => {
     const d = new Date(state.viewDate + "T00:00:00");
     d.setDate(d.getDate() - 1);
-    state.viewDate = d.toISOString().slice(0, 10);
+    state.viewDate = localDateStr(d);
     onChange();
   };
   const nextBtn = $("#dayNavNext");
@@ -950,7 +950,7 @@ function bindDayNav(onChange) {
     nextBtn.onclick = () => {
       const d = new Date(state.viewDate + "T00:00:00");
       d.setDate(d.getDate() + 1);
-      const next = d.toISOString().slice(0, 10);
+      const next = localDateStr(d);
       if (next <= todayStr()) { state.viewDate = next; onChange(); }
     };
   }
@@ -969,7 +969,24 @@ const state = {
   viewDate: null,        // which day's log is showing on Circulation/Patron Counts/Reference — set to todayStr() below once that's defined
 };
 
-const todayStr = () => new Date().toISOString().slice(0, 10);
+// IMPORTANT: always use LOCAL date components, never toISOString() (which
+// is always UTC), for anything meant to represent "what calendar day is
+// this locally." entry_hour is always local time (getHours()), so any date
+// string paired with it has to be local too, or they drift apart — in
+// Pacific time, UTC rolls over to the next calendar day at 5pm PDT/4pm PST,
+// which would silently misfile an evening entry onto the following day
+// while still showing the correct local hour. That mismatch is exactly what
+// caused entries appearing at hours that "haven't happened yet" on a given
+// day. This one helper is used everywhere a Date needs to become a
+// 'YYYY-MM-DD' string, so the same bug can't creep back in one call site
+// at a time.
+function localDateStr(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+const todayStr = () => localDateStr(new Date());
 state.viewDate = todayStr();
 const $ = (sel, root = document) => root.querySelector(sel);
 const app = $("#app");
@@ -1222,22 +1239,12 @@ async function loadStudentTable() {
 /* ── LIBRARIAN FORM (Hourly Patron Counts by Section) ────────────── */
 function renderLibrarianForm(body) {
   lcEditingId = null;
+  lcAddMissingOpen = false;
   const sections = sectionsForCampus(state.campus);
   body.innerHTML = `
     <div class="card">
       <h2>Library Patron Counts</h2>
-      <p class="card-sub">Enter how many patrons were in each section this hour — the total below adds itself up as you go.${state.campus === "ncc" ? " Showing North County's sections." : ""}</p>
-      <div class="field-row">
-        <div>
-          <label for="pcDate">Date</label>
-          <input id="pcDate" type="date" value="${todayStr()}" />
-        </div>
-        <div>
-          <label for="pcHour">Hour</label>
-          <select id="pcHour"></select>
-        </div>
-      </div>
-      <p class="help-text">Hours only go up to closing time for the selected date — 5pm on Fridays, 8pm other days.</p>
+      <p class="card-sub">Enter how many patrons are in each section right now — the total below adds itself up as you go. This logs under today's date and the current hour automatically.${state.campus === "ncc" ? " Showing North County's sections." : ""}</p>
       <label>Section counts</label>
       <div class="section-grid" id="pcSections">
         ${sections.map(([k, l]) => `
@@ -1255,6 +1262,7 @@ function renderLibrarianForm(body) {
       <label for="pcNotes">Notes (optional)</label>
       <input id="pcNotes" placeholder="e.g. event, context" />
       <button class="btn-stamp" id="pcSubmit">Log hourly counts</button>
+      <p class="help-text">Logging for the wrong hour, or missed an hour entirely? Fix or add it from the log below — navigate to the right day with the arrows, then use Edit on an existing entry or "Add missing data" for one that's absent.</p>
     </div>
     <div class="card">
       <div class="log-header">
@@ -1263,24 +1271,9 @@ function renderLibrarianForm(body) {
       </div>
       <div id="lcSummary" class="summary-strip"></div>
       <div id="lcTable"></div>
+      <div id="lcAddMissing"></div>
     </div>
   `;
-  const hourSel = $("#pcHour");
-  const nowHour = new Date().getHours();
-
-  const refreshHourOptions = () => {
-    const lastHour = lastOperatingHourForDate($("#pcDate").value || todayStr());
-    const prevValue = hourSel.value;
-    hourSel.innerHTML = hourOptions()
-      .filter(([h]) => h <= lastHour)
-      .map(([h, l]) => `<option value="${h}">${l}</option>`).join("");
-    // Keep the previous selection if it's still valid for the new date; otherwise
-    // fall back to the current hour if that's open, or the last open hour.
-    if (prevValue !== "" && parseInt(prevValue, 10) <= lastHour) hourSel.value = prevValue;
-    else hourSel.value = String(Math.min(nowHour, lastHour));
-  };
-  refreshHourOptions();
-  $("#pcDate").onchange = refreshHourOptions;
 
   const sectionInputs = [...$("#pcSections").querySelectorAll("[data-section]")];
   const updateTotal = () => {
@@ -1294,8 +1287,10 @@ function renderLibrarianForm(body) {
     const btn = $("#pcSubmit");
     btn.disabled = true;
     try {
-      const entry_date = $("#pcDate").value || todayStr();
-      const entry_hour = parseInt($("#pcHour").value, 10);
+      // Computed fresh right here, not cached from page load — so this is always
+      // accurate even if the tab's been open a while.
+      const entry_date = todayStr();
+      const entry_hour = new Date().getHours();
       const campus = state.campus;
       const notes = $("#pcNotes").value || null;
 
@@ -1330,6 +1325,7 @@ function renderLibrarianForm(body) {
 }
 
 let lcEditingId = null; // holds a group key ('hour__campus') while editing, or a raw row id for Study Room Availability rows
+let lcAddMissingOpen = false; // whether the "Add missing data" panel is expanded
 
 // Collapses the individual per-section rows from one submission (same hour
 // + campus) into a single group, so they can be shown as one line instead
@@ -1506,6 +1502,126 @@ async function loadLibrarianTable() {
       console.error(err);
       toast("Couldn't save: " + (err?.message || err), true);
     }
+  };
+
+  renderAddMissingSection(groups);
+}
+
+// Every hour+campus combination already covered by a patron_count group for
+// the currently-viewed day — used to figure out which hours are actually
+// "missing" and worth offering in the Add Missing Data panel.
+function usedHourCampusKeys(groups) {
+  return new Set(groups.map(g => `${g.entry_hour}__${g.campus}`));
+}
+
+function renderAddMissingSection(groups) {
+  const container = $("#lcAddMissing");
+  if (!container) return;
+
+  if (!lcAddMissingOpen) {
+    container.innerHTML = `<button class="btn-ghost" id="lcAddMissingToggle">+ Add missing data for ${fmtLogDate(state.viewDate)}</button>`;
+    $("#lcAddMissingToggle").onclick = () => { lcAddMissingOpen = true; renderAddMissingSection(groups); };
+    return;
+  }
+
+  const usedKeys = usedHourCampusKeys(groups);
+  const lastHour = lastOperatingHourForDate(state.viewDate);
+
+  container.innerHTML = `
+    <div class="card" style="margin-top:14px; background:var(--paper);">
+      <h3 style="font-family:var(--font-display); font-size:1rem; margin:0 0 10px;">Add missing data — ${fmtLogDate(state.viewDate)}</h3>
+      <p class="help-text">Only hours that don't already have patron counts logged for the chosen campus show up here — nothing here defaults to zero, this only adds real numbers you enter.</p>
+      <div class="field-row">
+        <div>
+          <label for="amCampus">Campus</label>
+          <select id="amCampus">${CAMPUSES.map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select>
+        </div>
+        <div>
+          <label for="amHour">Hour</label>
+          <select id="amHour"></select>
+        </div>
+      </div>
+      <div id="amSectionsWrap"></div>
+      <div class="total-strip">Total Patrons <b id="amTotal">0</b></div>
+      <label for="amRoomsOpen">Study rooms currently open / empty</label>
+      <input id="amRoomsOpen" type="number" min="0" placeholder="e.g. 3" />
+      <label for="amNotes">Notes (optional)</label>
+      <input id="amNotes" placeholder="e.g. event, context" />
+      <div class="row-actions" style="margin-top:12px; gap:8px;">
+        <button class="btn-stamp" id="amSubmit">Log this hour</button>
+        <button class="btn-ghost" id="amCancel">Cancel</button>
+      </div>
+    </div>
+  `;
+
+  const refreshHourOptions = () => {
+    const campus = $("#amCampus").value;
+    const available = hourOptions().filter(([h]) => h <= lastHour && !usedKeys.has(`${h}__${campus}`));
+    const sel = $("#amHour");
+    sel.innerHTML = available.length
+      ? available.map(([h, l]) => `<option value="${h}">${l}</option>`).join("")
+      : `<option value="">No missing hours for this campus</option>`;
+  };
+
+  const refreshSections = () => {
+    const campus = $("#amCampus").value;
+    const sections = sectionsForCampus(campus);
+    $("#amSectionsWrap").innerHTML = `
+      <label>Section counts</label>
+      <div class="section-grid" id="amSections">
+        ${sections.map(([k, l]) => `
+          <div class="section-field">
+            <label for="am_${k}">${l}</label>
+            <input id="am_${k}" type="number" min="0" value="0" data-section="${k}" />
+          </div>`).join("")}
+      </div>
+    `;
+    const inputs = [...$("#amSections").querySelectorAll("[data-section]")];
+    const updateAmTotal = () => { $("#amTotal").textContent = inputs.reduce((s, el) => s + (parseInt(el.value, 10) || 0), 0); };
+    inputs.forEach(el => { el.oninput = updateAmTotal; });
+    updateAmTotal();
+  };
+
+  refreshHourOptions();
+  refreshSections();
+  $("#amCampus").onchange = () => { refreshHourOptions(); refreshSections(); };
+
+  $("#amCancel").onclick = () => { lcAddMissingOpen = false; loadLibrarianTable(); };
+
+  $("#amSubmit").onclick = async () => {
+    const hourVal = $("#amHour").value;
+    if (hourVal === "") { toast("No missing hour to add for this campus", true); return; }
+    const btn = $("#amSubmit");
+    btn.disabled = true;
+    try {
+      const campus = $("#amCampus").value;
+      const entry_hour = parseInt(hourVal, 10);
+      const entry_date = state.viewDate;
+      const notes = $("#amNotes").value || null;
+      const inputs = [...$("#amSections").querySelectorAll("[data-section]")];
+
+      let total = 0;
+      for (const el of inputs) {
+        const count = parseInt(el.value, 10) || 0;
+        total += count;
+        if (count > 0) {
+          await insertInteraction({ entry_date, entry_hour, role: GENERIC_ROLE, category: "patron_count", subcategory: el.dataset.section, count, notes, campus });
+        }
+      }
+      await insertInteraction({ entry_date, entry_hour, role: GENERIC_ROLE, category: "patron_count", subcategory: "total_patrons", count: total, notes, campus });
+
+      const roomsVal = $("#amRoomsOpen").value;
+      if (roomsVal !== "") {
+        await insertInteraction({ entry_date, entry_hour, role: GENERIC_ROLE, category: "study_room_availability", subcategory: "empty_rooms", count: Math.max(0, parseInt(roomsVal, 10) || 0), notes, campus });
+      }
+
+      toast("Logged ✓");
+      lcAddMissingOpen = false;
+      loadLibrarianTable();
+    } catch (err) {
+      console.error(err);
+      toast("Couldn't save: " + (err?.message || err), true);
+    } finally { btn.disabled = false; }
   };
 }
 
@@ -1715,7 +1831,7 @@ function currentWeekRange() {
   monday.setDate(now.getDate() - diffToMonday);
   const sunday = new Date(monday);
   sunday.setDate(monday.getDate() + 6);
-  const fmt = (d) => d.toISOString().slice(0, 10);
+  const fmt = (d) => localDateStr(d);
   return { from: fmt(monday), to: fmt(sunday), mondayDate: monday };
 }
 
@@ -1948,7 +2064,7 @@ function normalizeCsvRows(rows) {
     const lower = {};
     Object.keys(r).forEach(k => { lower[k.trim().toLowerCase()] = r[k]; });
     const dateRaw = lower.date || lower.entry_date || lower.day;
-    const entry_date = dateRaw ? new Date(dateRaw).toISOString().slice(0, 10) : null;
+    const entry_date = dateRaw ? localDateStr(new Date(dateRaw)) : null;
     const hourRaw = lower.hour ?? lower.entry_hour;
     const entry_hour = hourRaw !== undefined && hourRaw !== "" ? parseInt(hourRaw, 10) : null;
     const countRaw = lower.count ?? lower.total ?? lower.value;
@@ -1974,7 +2090,7 @@ function bucketKeyForDate(dateStr, granularity) {
   if (granularity === "week") {
     const day = d.getDay();
     d.setDate(d.getDate() - (day === 0 ? 6 : day - 1)); // Monday of that week
-    return d.toISOString().slice(0, 10);
+    return localDateStr(d);
   }
   return dateStr.slice(0, 7); // 'YYYY-MM'
 }
@@ -2047,8 +2163,8 @@ function quickRanges() {
 
   const ranges = [
     { key: "today", label: "Today", from: todayS, to: todayS },
-    { key: "week", label: "This Week", from: monday.toISOString().slice(0, 10), to: todayS },
-    { key: "month", label: "This Month", from: firstOfMonth.toISOString().slice(0, 10), to: todayS },
+    { key: "week", label: "This Week", from: localDateStr(monday), to: todayS },
+    { key: "month", label: "This Month", from: localDateStr(firstOfMonth), to: todayS },
   ];
   TERMS.forEach(t => ranges.push({ key: t.key, label: t.label, from: t.from, to: t.to }));
   const ay = currentAcademicYear();
@@ -2069,7 +2185,7 @@ function renderDashboard(body) {
         ${quickRanges().map(r => `<button type="button" class="chip-option" data-range-key="${r.key}">${r.label}</button>`).join("")}
       </div>
       <div class="field-row">
-        <div><label for="dFrom">From</label><input id="dFrom" type="date" value="${from.toISOString().slice(0,10)}" /></div>
+        <div><label for="dFrom">From</label><input id="dFrom" type="date" value="${localDateStr(from)}" /></div>
         <div><label for="dTo">To</label><input id="dTo" type="date" value="${todayStr()}" /></div>
       </div>
       <div class="field-row">
@@ -2321,7 +2437,7 @@ render();
 setInterval(() => {
   if (state.viewDate !== todayStr()) return;
   if (state.view === "student" && scEditingId === null) loadStudentTable();
-  else if (state.view === "librarian" && lcEditingId === null) loadLibrarianTable();
+  else if (state.view === "librarian" && lcEditingId === null && !lcAddMissingOpen) loadLibrarianTable();
   else if (state.view === "reference" && rfEditingId === null) loadReferenceTable();
   else if (state.view === "weekly" && wlEditingId === null) {
     const { from, to } = currentWeekRange();
